@@ -51,6 +51,7 @@ depends:
 #include "CameraBase.hpp"
 #include "app_framework.hpp"
 #include "libxr.hpp"
+#include "libxr_string.hpp"
 #include "logger.hpp"
 #include "message.hpp"
 #include "thread.hpp"
@@ -134,12 +135,12 @@ class CaptureFileCamera : public LibXR::Application,
         file_path_(runtime.file_path),
         imu_csv_path_(runtime.imu_csv_path),
         runtime_(runtime),
-        gyro_topic_name_(std::string(this->Name()) + "_gyro"),
-        accl_topic_name_(std::string(this->Name()) + "_accl"),
-        quat_topic_name_(std::string(this->Name()) + "_quat"),
-        raw_gyro_topic_(LibXR::Topic::FindOrCreate<GyroStamped>(gyro_topic_name_.c_str())),
-        raw_accl_topic_(LibXR::Topic::FindOrCreate<AcclStamped>(accl_topic_name_.c_str())),
-        raw_quat_topic_(LibXR::Topic::FindOrCreate<QuatStamped>(quat_topic_name_.c_str()))
+        gyro_topic_name_(this->NameView(), "_gyro"),
+        accl_topic_name_(this->NameView(), "_accl"),
+        quat_topic_name_(this->NameView(), "_quat"),
+        raw_gyro_topic_(LibXR::Topic::FindOrCreate<GyroStamped>(gyro_topic_name_.CStr())),
+        raw_accl_topic_(LibXR::Topic::FindOrCreate<AcclStamped>(accl_topic_name_.CStr())),
+        raw_quat_topic_(LibXR::Topic::FindOrCreate<QuatStamped>(quat_topic_name_.CStr()))
   {
     ApplyEnvironmentOverrides();
     ValidateVideo();
@@ -270,9 +271,10 @@ class CaptureFileCamera : public LibXR::Application,
       throw std::runtime_error("CaptureFileCamera: geometry mismatch");
     }
 
-    XR_LOG_PASS("CaptureFileCamera opened %s: %dx%d fps=%.3f period=%llu us",
-                file_path_.c_str(), width, height, fps,
-                static_cast<unsigned long long>(fallback_period_us_));
+    const auto fps_milli = static_cast<unsigned>(std::llround(fps * 1000.0));
+    const auto period_us = static_cast<unsigned>(fallback_period_us_);
+    XR_LOG_PASS("CaptureFileCamera opened %s: %dx%d fps_milli=%u period_us=%u",
+                file_path_.c_str(), width, height, fps_milli, period_us);
   }
 
   // 构造期加载显式 IMU 文件，运行时只按帧索引取样。
@@ -315,8 +317,8 @@ class CaptureFileCamera : public LibXR::Application,
       throw std::runtime_error("CaptureFileCamera: empty imu csv");
     }
 
-    XR_LOG_PASS("CaptureFileCamera loaded %zu IMU samples from %s",
-                imu_samples_.size(), imu_csv_path_.c_str());
+    XR_LOG_PASS("CaptureFileCamera loaded %u IMU samples from %s",
+                static_cast<unsigned>(imu_samples_.size()), imu_csv_path_.c_str());
   }
 
   // 等 CameraFrameSync 接好图像 sink，避免启动阶段白丢前几帧。
@@ -501,9 +503,9 @@ class CaptureFileCamera : public LibXR::Application,
   RuntimeParam runtime_{};  ///< 应用环境变量覆盖后的运行时参数。
   std::vector<ImuSample> imu_samples_{};  ///< 与视频帧按索引对应的 IMU 数据。
 
-  std::string gyro_topic_name_{};  ///< `<camera_name>_gyro`。
-  std::string accl_topic_name_{};  ///< `<camera_name>_accl`。
-  std::string quat_topic_name_{};  ///< `<camera_name>_quat`。
+  LibXR::RuntimeStringView<> gyro_topic_name_{};  ///< `<camera_name>_gyro`。
+  LibXR::RuntimeStringView<> accl_topic_name_{};  ///< `<camera_name>_accl`。
+  LibXR::RuntimeStringView<> quat_topic_name_{};  ///< `<camera_name>_quat`。
 
   LibXR::Topic raw_gyro_topic_{};  ///< CameraFrameSync 消费的原始陀螺话题。
   LibXR::Topic raw_accl_topic_{};  ///< CameraFrameSync 消费的原始加速度话题。
