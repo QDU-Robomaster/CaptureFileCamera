@@ -1,0 +1,109 @@
+name: Manual ChArUco Calibration Replay
+
+on:
+  workflow_dispatch:
+    inputs:
+      video_base_url:
+        description: Base URL containing 25mm_4x4.mp4, 25mm_8x6.mp4, and 15mm_11x8.mp4
+        required: true
+        default: https://github.com/QDU-Robomaster/CaptureFileCamera/releases/download/charuco-calib-videos-20260504
+      camera_base_ref:
+        description: CameraBase ref that provides the cali command
+        required: true
+        default: codex/live-calibration-command-20260503
+      camera_frame_sync_ref:
+        description: CameraFrameSync ref used as the image sink
+        required: true
+        default: master
+      camera_sync_ref:
+        description: CameraSync ref required by CameraFrameSync
+        required: true
+        default: master
+      libxr_ref:
+        description: libxr ref used by the replay harness
+        required: true
+        default: master
+
+jobs:
+  charuco-calibration-replay:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/xrobot-org/docker-image-linux:main
+      options: --user 0
+
+    env:
+      XR_MODULE_NAME: ${{ github.event.repository.name }}
+      VIDEO_BASE_URL: ${{ inputs.video_base_url }}
+
+    steps:
+      - name: Checkout CaptureFileCamera
+        uses: actions/checkout@v4
+        with:
+          path: Modules/${{ env.XR_MODULE_NAME }}
+
+      - name: Checkout CameraBase
+        uses: actions/checkout@v4
+        with:
+          repository: QDU-Robomaster/CameraBase
+          ref: ${{ inputs.camera_base_ref }}
+          path: Modules/CameraBase
+
+      - name: Checkout CameraFrameSync
+        uses: actions/checkout@v4
+        with:
+          repository: QDU-Robomaster/CameraFrameSync
+          ref: ${{ inputs.camera_frame_sync_ref }}
+          path: Modules/CameraFrameSync
+
+      - name: Checkout CameraSync
+        uses: actions/checkout@v4
+        with:
+          repository: QDU-Robomaster/CameraSync
+          ref: ${{ inputs.camera_sync_ref }}
+          path: Modules/CameraSync
+
+      - name: Pull libxr
+        run: |
+          git clone --depth=1 https://github.com/Jiu-xiao/libxr ./libxr
+          git -C ./libxr fetch --depth=1 origin "${{ inputs.libxr_ref }}"
+          git -C ./libxr checkout FETCH_HEAD
+
+      - name: Install dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends curl ffmpeg libopencv-dev ninja-build
+          python3 -m pip install --upgrade pip
+          pip3 install pyyaml requests xrobot libxr
+
+      - name: Add XRobot tools to PATH
+        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Download calibration videos
+        run: |
+          mkdir -p calib_videos
+          curl -fL "${VIDEO_BASE_URL}/25mm_4x4.mp4" -o calib_videos/25mm_4x4.mp4
+          curl -fL "${VIDEO_BASE_URL}/25mm_8x6.mp4" -o calib_videos/25mm_8x6.mp4
+          curl -fL "${VIDEO_BASE_URL}/15mm_11x8.mp4" -o calib_videos/15mm_11x8.mp4
+          sha256sum -c <<'EOF'
+          33e82cc2beadf6e7e7107d0e515cc41e9cbd00b5461ff14eec05701683a74f9b  calib_videos/25mm_4x4.mp4
+          7f7d7738e52facccac0ca12cf7fa0ce6245e7c937f14722d2d1a337cb8565a2d  calib_videos/25mm_8x6.mp4
+          5308f8da798725b9fe1f5cb38609439bd10f1b51e9ff4b923fa68174d216e27d  calib_videos/15mm_11x8.mp4
+          EOF
+
+      - name: Run replay calibration test
+        run: |
+          chmod +x Modules/${{ env.XR_MODULE_NAME }}/ci/run_charuco_calibration_replay.sh
+          VIDEO_DIR="${GITHUB_WORKSPACE}/calib_videos" \
+          CALIB_RUN_ROOT="${GITHUB_WORKSPACE}/calib_replay_run" \
+          Modules/${{ env.XR_MODULE_NAME }}/ci/run_charuco_calibration_replay.sh
+
+      - name: Upload calibration replay artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: charuco-calibration-replay
+          path: |
+            calib_replay_run/summary.txt
+            calib_replay_run/**/*.log
+            calib_replay_run/**/calibration/**
+          if-no-files-found: warn
