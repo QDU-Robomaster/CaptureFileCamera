@@ -13,26 +13,35 @@
 
 namespace CaptureFileCameraDetail
 {
+/// 默认 100 Hz 回放周期；仅在 CSV 相邻时间戳或视频 FPS 不可用时兜底。
 static constexpr uint64_t default_period_us = 10000;
 static constexpr double microseconds_per_second = 1000000.0;
 static constexpr uint64_t microseconds_per_millisecond = 1000;
 
+/**
+ * @brief CSV 中的一帧传感器记录。
+ *
+ * `timestamp_us` 是传感器侧采样时间戳。发布原始 gyro/accl/quat 时，
+ * 该值写入 Topic timestamp，payload 只携带测量数组。
+ */
 struct ImuSample
 {
-  uint64_t timestamp_us{};
-  std::array<float, 4> quat_wxyz{};
-  std::array<float, 3> gyro_xyz{};
-  std::array<float, 3> accl_xyz{};
+  uint64_t timestamp_us{};  ///< 传感器侧时间戳，单位微秒。
+  std::array<float, 4> quat_wxyz{};  ///< 姿态四元数，顺序为 wxyz。
+  std::array<float, 3> gyro_xyz{};  ///< 角速度，单位 rad/s。
+  std::array<float, 3> accl_xyz{};  ///< 线加速度，单位 m/s^2。
 };
 
+/// 视频几何信息和回放限速兜底周期。
 struct VideoInfo
 {
-  int width{};
-  int height{};
-  double fps{};
-  uint64_t fallback_period_us{default_period_us};
+  int width{};  ///< 视频宽度，单位像素。
+  int height{};  ///< 视频高度，单位像素。
+  double fps{};  ///< OpenCV 读取到的帧率，可能为 0 或无效值。
+  uint64_t fallback_period_us{default_period_us};  ///< 无法从 CSV 推导周期时使用。
 };
 
+/// 解析一个十进制数字 token，拒绝尾部非空白字符和非有限值。
 inline bool ParseNumber(const std::string& token, double& value)
 {
   const char* begin = token.c_str();
@@ -49,6 +58,7 @@ inline bool ParseNumber(const std::string& token, double& value)
   return *end == '\0' && std::isfinite(value);
 }
 
+/// 空行和 `#` 注释行不参与 CSV 数据解析。
 inline bool IsSkippableCsvLine(const std::string& line)
 {
   for (char ch : line)
@@ -61,6 +71,7 @@ inline bool IsSkippableCsvLine(const std::string& line)
   return true;
 }
 
+/// 解析固定列顺序：timestamp_us,qw,qx,qy,qz,gx,gy,gz,ax,ay,az。
 inline bool ParseImuCsvRow(const std::string& line, ImuSample& sample)
 {
   std::array<double, 11> values{};
@@ -90,6 +101,7 @@ inline bool ParseImuCsvRow(const std::string& line, ImuSample& sample)
   return true;
 }
 
+/// 将 OpenCV 解码出的常见 8 位图像格式统一成 BGR8。
 inline bool ConvertToBgr(const cv::Mat& decoded, cv::Mat& bgr)
 {
   if (decoded.empty())

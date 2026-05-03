@@ -2,7 +2,7 @@
 
 // clang-format off
 /* === MODULE MANIFEST V2 ===
-module_description: 内录文件相机，发布图像与录制姿态数据
+module_description: 内录文件相机，发布清洗视频帧与原始 IMU 数据
 constructor_args:
   - runtime:
       file_path: "capture.avi"
@@ -274,8 +274,7 @@ class CaptureFileCamera : public LibXR::Application,
     }
   }
 
-  // 先发布原始 IMU，再提交图像。采样时间戳走 Topic envelope，
-  // 由同步模块负责与图像帧对齐。
+  // 采样时间戳写入 Topic envelope；payload 只保留测量值。
   void PublishRawImu(const ImuSample& sample)
   {
     ImuVector gyro_msg = sample.gyro_xyz;
@@ -321,7 +320,7 @@ class CaptureFileCamera : public LibXR::Application,
     return true;
   }
 
-  // 单帧处理：读显式 IMU、提交图像、按需限速。
+  // 单帧处理：按同一帧索引发布 IMU 和图像；限速只复现回放节奏。
   bool ProcessFrame(const cv::Mat& decoded, const ImuSample& imu, uint64_t period_us)
   {
     cv::Mat bgr;
