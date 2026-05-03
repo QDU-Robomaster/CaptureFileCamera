@@ -70,9 +70,8 @@ class CaptureFileCamera : public LibXR::Application,
   using Self = CaptureFileCamera<CameraInfoV>;
   using Base = CameraBase<CameraInfoV>;
   using ImageFrame = typename Base::ImageFrame;
-  using GyroStamped = typename Base::GyroStamped;
-  using AcclStamped = typename Base::AcclStamped;
-  using QuatStamped = typename Base::QuatStamped;
+  using ImuVector = std::array<float, 3>;
+  using QuatSample = std::array<float, 4>;
 
   // 编译期相机模型来自 BSP YAML 预设。
   static inline constexpr auto camera_info = Base::camera_info;
@@ -137,9 +136,9 @@ class CaptureFileCamera : public LibXR::Application,
         gyro_topic_name_(std::string(this->Name()) + "_gyro"),
         accl_topic_name_(std::string(this->Name()) + "_accl"),
         quat_topic_name_(std::string(this->Name()) + "_quat"),
-        raw_gyro_topic_(LibXR::Topic::FindOrCreate<GyroStamped>(gyro_topic_name_.c_str())),
-        raw_accl_topic_(LibXR::Topic::FindOrCreate<AcclStamped>(accl_topic_name_.c_str())),
-        raw_quat_topic_(LibXR::Topic::FindOrCreate<QuatStamped>(quat_topic_name_.c_str()))
+        raw_gyro_topic_(LibXR::Topic::FindOrCreate<ImuVector>(gyro_topic_name_.c_str())),
+        raw_accl_topic_(LibXR::Topic::FindOrCreate<ImuVector>(accl_topic_name_.c_str())),
+        raw_quat_topic_(LibXR::Topic::FindOrCreate<QuatSample>(quat_topic_name_.c_str()))
   {
     ApplyEnvironmentOverrides();
     ValidateVideo();
@@ -355,25 +354,18 @@ class CaptureFileCamera : public LibXR::Application,
     return false;
   }
 
-  // 先发布原始 IMU，再提交图像，便于 LATEST_IMU 模式拿到同帧数据。
+  // 先发布原始 IMU，再提交图像。采样时间戳走 Topic envelope，
+  // 由同步模块负责与图像帧对齐。
   void PublishRawImu(const ImuSample& sample)
   {
-    GyroStamped gyro_msg{
-        .sensor_timestamp_us = sample.timestamp_us,
-        .angular_velocity_xyz = sample.gyro_xyz,
-    };
-    AcclStamped accl_msg{
-        .sensor_timestamp_us = sample.timestamp_us,
-        .linear_acceleration_xyz = sample.accl_xyz,
-    };
-    QuatStamped quat_msg{
-        .sensor_timestamp_us = sample.timestamp_us,
-        .rotation_wxyz = sample.quat_wxyz,
-    };
+    ImuVector gyro_msg = sample.gyro_xyz;
+    ImuVector accl_msg = sample.accl_xyz;
+    QuatSample quat_msg = sample.quat_wxyz;
+    const LibXR::MicrosecondTimestamp timestamp(sample.timestamp_us);
 
-    raw_gyro_topic_.Publish(gyro_msg);
-    raw_accl_topic_.Publish(accl_msg);
-    raw_quat_topic_.Publish(quat_msg);
+    raw_gyro_topic_.Publish(gyro_msg, timestamp);
+    raw_accl_topic_.Publish(accl_msg, timestamp);
+    raw_quat_topic_.Publish(quat_msg, timestamp);
     imu_published_.fetch_add(1);
   }
 

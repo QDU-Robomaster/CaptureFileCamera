@@ -10,7 +10,11 @@
 输出：
 
 - 图像：`BGR8 1440x1080 step=4320`
-- 原始 IMU 话题：`<camera_name>_gyro`、`<camera_name>_accl`、`<camera_name>_quat`
+- 原始 IMU 话题：
+  - `<camera_name>_gyro`：`std::array<float, 3>`，角速度，单位 rad/s
+  - `<camera_name>_accl`：`std::array<float, 3>`，线加速度，单位 m/s^2
+  - `<camera_name>_quat`：`std::array<float, 4>`，姿态四元数，顺序 wxyz
+- 原始 IMU payload 只保存测量值，CSV 的 `timestamp_us` 通过 Topic timestamp 携带
 
 要求：
 
