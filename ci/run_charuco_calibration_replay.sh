@@ -258,6 +258,23 @@ print(f"views={views} rms={rms:.6f} fx={k[0]:.6f} fy={k[4]:.6f} cx={k[2]:.6f} cy
 PY
 }
 
+check_quality_report() {
+  local report="$1"
+
+  if [[ ! -f "${report}" ]]; then
+    echo "缺少标定质量报告: ${report}" >&2
+    return 1
+  fi
+  if ! grep -q "质量总判定(quality_ok): 通过" "${report}"; then
+    echo "标定质量总判定未通过: ${report}" >&2
+    return 1
+  fi
+  if ! grep -q "重投影判定(reprojection_ok): 通过" "${report}"; then
+    echo "重投影判定未通过: ${report}" >&2
+    return 1
+  fi
+}
+
 run_case() {
   local name="$1"
   local marker="$2"
@@ -293,6 +310,7 @@ run_case() {
     tail -120 "${case_dir}/run.log" >&2 || true
     return 1
   fi
+  check_quality_report "$(dirname "${yaml}")/quality_report.txt"
 
   mkdir -p "${case_dir}/calibration"
   cp -a "$(dirname "${yaml}")"/. "${case_dir}/calibration/"

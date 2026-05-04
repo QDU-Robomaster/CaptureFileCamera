@@ -10,7 +10,7 @@ on:
       camera_base_ref:
         description: CameraBase ref that provides the cali command
         required: true
-        default: codex/live-calibration-command-20260503
+        default: master
       camera_frame_sync_ref:
         description: CameraFrameSync ref used as the image sink
         required: true

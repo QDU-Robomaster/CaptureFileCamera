@@ -72,7 +72,9 @@ payload 只包含测量值：
 
 本仓库的 `Manual ChArUco Calibration Replay` GitHub Actions workflow 用三段
 ChArUco 录制视频回放 `CaptureFileCamera`，并调用 `CameraBase` 的 `cali`
-命令保存标定结果。标定算法仍归属 `CameraBase`；这里验证内录文件相机能稳定复现这条输入链路。
+命令保存标定结果。workflow 会检查 `calibration.yml` 的视角数/RMS，也会检查
+`quality_report.txt` 中的质量总判定和重投影判定。标定算法仍归属 `CameraBase`；
+这里验证内录文件相机能稳定复现这条输入链路。
 
 默认视频资产来自仓库 release `charuco-calib-videos-20260504`。手动触发 workflow
 时可以覆盖 `video_base_url`、`CameraBase` / `CameraFrameSync` / `CameraSync`
