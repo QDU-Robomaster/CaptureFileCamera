@@ -12,6 +12,7 @@ constructor_args:
       imu_topic_name: "camera_imu"
       realtime: true
       loop: false
+      max_frames: 0
 template_args:
   - Info:
       width: 1440
