@@ -32,6 +32,22 @@ struct ImuSample
   std::array<float, 3> accl_xyz{};  ///< 线加速度，单位 m/s^2。
 };
 
+/// CameraBase 内录帧索引。
+struct FrameRecord
+{
+  uint64_t frame_index{};  ///< CameraBase 记录时的连续帧号。
+  uint64_t timestamp_us{};  ///< 图像传感器侧时间戳，单位微秒。
+  uint64_t offset_bytes{};  ///< 当前 JPEG blob 在 frames.bin 中的起始偏移。
+  uint64_t size_bytes{};  ///< 当前 JPEG blob 的字节数。
+};
+
+/// 内录包回放时的一条已对齐记录。
+struct PackageReplayFrame
+{
+  FrameRecord frame{};  ///< JPEG 图像位置。
+  ImuSample imu{};  ///< 与该图像 timestamp 对齐的 IMU。
+};
+
 /// 视频几何信息和回放限速兜底周期。
 struct VideoInfo
 {
@@ -98,6 +114,34 @@ inline bool ParseImuCsvRow(const std::string& line, ImuSample& sample)
                      static_cast<float>(values[7])};
   sample.accl_xyz = {static_cast<float>(values[8]), static_cast<float>(values[9]),
                      static_cast<float>(values[10])};
+  return true;
+}
+
+/// 解析固定列顺序：frame_index,camera_timestamp_us,offset_bytes,size_bytes。
+inline bool ParseFrameCsvRow(const std::string& line, FrameRecord& frame)
+{
+  std::array<double, 4> values{};
+  std::stringstream stream(line);
+  std::string token;
+  std::size_t index = 0;
+  while (std::getline(stream, token, ','))
+  {
+    if (index >= values.size() || !ParseNumber(token, values[index]))
+    {
+      return false;
+    }
+    ++index;
+  }
+  if (index != values.size() || values[0] < 0.0 || values[1] < 0.0 ||
+      values[2] < 0.0 || values[3] < 0.0)
+  {
+    return false;
+  }
+
+  frame.frame_index = static_cast<uint64_t>(std::llround(values[0]));
+  frame.timestamp_us = static_cast<uint64_t>(std::llround(values[1]));
+  frame.offset_bytes = static_cast<uint64_t>(std::llround(values[2]));
+  frame.size_bytes = static_cast<uint64_t>(std::llround(values[3]));
   return true;
 }
 
