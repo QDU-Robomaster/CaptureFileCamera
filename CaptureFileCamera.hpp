@@ -42,6 +42,7 @@ depends:
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -112,11 +113,6 @@ class CaptureFileCamera : public LibXR::Application,
    */
   static constexpr uint32_t image_sink_wait_log_ms = 1000;
 
-  /**
-   * @brief 采集线程栈大小；OpenCV 解码和图像拷贝不使用嵌入式小栈。
-   */
-  static constexpr std::size_t capture_thread_stack_bytes = 256 * 1024;
-
   static_assert(camera_info.encoding == CameraTypes::Encoding::BGR8,
                 "CaptureFileCamera currently publishes BGR8 frames");
   static_assert(frame_step == static_cast<std::size_t>(camera_info.width) * channel_count,
@@ -174,15 +170,21 @@ class CaptureFileCamera : public LibXR::Application,
       ValidateVideo();
     }
     running_.store(true);
-    capture_thread_.Create(this, CaptureThreadMain, "CaptureFileCam",
-                           capture_thread_stack_bytes, LibXR::Thread::Priority::HIGH);
+    capture_thread_ = std::thread(CaptureThreadMain, this);
     app.Register(*this);
   }
 
   /**
    * @brief 通知采集线程在下一轮循环退出。
    */
-  ~CaptureFileCamera() override { running_.store(false); }
+  ~CaptureFileCamera() override
+  {
+    running_.store(false);
+    if (capture_thread_.joinable())
+    {
+      capture_thread_.join();
+    }
+  }
 
   /**
    * @brief 周期性输出回放状态。
@@ -779,7 +781,7 @@ class CaptureFileCamera : public LibXR::Application,
   LibXR::Topic raw_accl_topic_{};  ///< CameraFrameSync 消费的原始加速度话题。
   LibXR::Topic raw_quat_topic_{};  ///< CameraFrameSync 消费的原始姿态话题。
 
-  LibXR::Thread capture_thread_{};  ///< 解码和发布线程。
+  std::thread capture_thread_{};  ///< 解码和发布线程。
 
   std::atomic<bool> running_{false};  ///< 采集线程退出标志。
 
