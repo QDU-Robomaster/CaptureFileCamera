@@ -63,7 +63,7 @@ depends:
 
 /**
  * @class CaptureFileCamera
- * @brief 文件相机源，用干净视频和同帧 IMU CSV 按 CameraBase 合约发布数据。
+ * @brief 文件相机源，用干净视频或内录包按 CameraBase 合约发布数据。
  *
  * 模块只消费清洗后的 capture package：视频文件只包含图像，IMU CSV 显式
  * 给出每帧的 timestamp/quat/gyro/accl。
@@ -447,7 +447,7 @@ class CaptureFileCamera : public LibXR::Application,
   }
 
   /**
-   * @brief 校验 frames bin 是否包含回放计划要求的完整 JPEG blob。
+   * @brief 校验 frames bin 是否包含回放计划要求的完整图像载荷。
    */
   void ValidateRecordingPackage()
   {
@@ -472,10 +472,10 @@ class CaptureFileCamera : public LibXR::Application,
       if (replay.frame.size_bytes == 0 || replay.frame.offset_bytes > file_size ||
           replay.frame.size_bytes > file_size - replay.frame.offset_bytes)
       {
-        XR_LOG_ERROR("CaptureFileCamera invalid JPEG frame span offset=%u size=%u",
+        XR_LOG_ERROR("CaptureFileCamera invalid frame span offset=%u size=%u",
                      static_cast<unsigned>(replay.frame.offset_bytes),
                      static_cast<unsigned>(replay.frame.size_bytes));
-        throw std::runtime_error("CaptureFileCamera: invalid JPEG frame span");
+        throw std::runtime_error("CaptureFileCamera: invalid frame span");
       }
       max_end = std::max(max_end, replay.frame.offset_bytes + replay.frame.size_bytes);
     }
@@ -567,35 +567,77 @@ class CaptureFileCamera : public LibXR::Application,
     return true;
   }
 
+  bool PackageFrameIsRaw(const FrameRecord& frame) const
+  {
+    if (CaptureFileCameraDetail::CodecIsRaw(frame.codec))
+    {
+      return true;
+    }
+    return frame.codec.empty() && frame.size_bytes == Base::image_bytes;
+  }
+
+  bool ReadPackagePayload(std::ifstream& frames, const FrameRecord& frame,
+                          std::vector<uint8_t>& payload)
+  {
+    payload.resize(static_cast<std::size_t>(frame.size_bytes));
+    frames.clear();
+    frames.seekg(static_cast<std::streamoff>(frame.offset_bytes), std::ios::beg);
+    frames.read(reinterpret_cast<char*>(payload.data()),
+                static_cast<std::streamsize>(payload.size()));
+    if (!frames.good())
+    {
+      XR_LOG_ERROR("CaptureFileCamera frame payload read failed index=%u",
+                   static_cast<unsigned>(frame.frame_index));
+      return false;
+    }
+    return true;
+  }
+
   /**
-   * @brief 从 frames bin 读取一帧 JPEG，解码后提交到 CameraBase。
+   * @brief 从 frames bin 读取一帧图像载荷，解码后提交到 CameraBase。
    */
   bool ReadAndCommitPackageFrame(std::ifstream& frames, const PackageReplayFrame& replay)
   {
-    std::vector<uint8_t> encoded(static_cast<std::size_t>(replay.frame.size_bytes));
-    frames.clear();
-    frames.seekg(static_cast<std::streamoff>(replay.frame.offset_bytes), std::ios::beg);
-    frames.read(reinterpret_cast<char*>(encoded.data()),
-                static_cast<std::streamsize>(encoded.size()));
-    if (!frames.good())
+    std::vector<uint8_t> payload;
+    if (!ReadPackagePayload(frames, replay.frame, payload))
     {
-      XR_LOG_ERROR("CaptureFileCamera JPEG frame read failed index=%u",
-                   static_cast<unsigned>(replay.frame.frame_index));
       return false;
     }
 
-    cv::Mat encoded_mat(1, static_cast<int>(encoded.size()), CV_8UC1, encoded.data());
+    if (PackageFrameIsRaw(replay.frame))
+    {
+      if (payload.size() != Base::image_bytes)
+      {
+        XR_LOG_ERROR(
+            "CaptureFileCamera raw frame size mismatch index=%u size=%u expected=%u",
+            static_cast<unsigned>(replay.frame.frame_index),
+            static_cast<unsigned>(payload.size()),
+            static_cast<unsigned>(Base::image_bytes));
+        return false;
+      }
+      cv::Mat bgr(frame_height, frame_width, CV_8UC3, payload.data(), frame_step);
+      if (!FrameShapeMatches(bgr))
+      {
+        XR_LOG_ERROR("CaptureFileCamera raw frame shape mismatch index=%u",
+                     static_cast<unsigned>(replay.frame.frame_index));
+        return false;
+      }
+      return WriteAndCommitImage(bgr, replay.frame.timestamp_us);
+    }
+
+    cv::Mat encoded_mat(1, static_cast<int>(payload.size()), CV_8UC1, payload.data());
     const cv::Mat decoded = cv::imdecode(encoded_mat, cv::IMREAD_UNCHANGED);
     cv::Mat bgr;
     if (!CaptureFileCameraDetail::ConvertToBgr(decoded, bgr))
     {
-      XR_LOG_ERROR("CaptureFileCamera JPEG decode failed index=%u",
-                   static_cast<unsigned>(replay.frame.frame_index));
+      XR_LOG_ERROR("CaptureFileCamera encoded frame decode failed index=%u codec=%s",
+                   static_cast<unsigned>(replay.frame.frame_index),
+                   replay.frame.codec.c_str());
       return false;
     }
     if (!FrameShapeMatches(bgr))
     {
-      XR_LOG_ERROR("CaptureFileCamera JPEG frame shape mismatch index=%u",
+      XR_LOG_ERROR("CaptureFileCamera encoded frame shape mismatch index=%u",
                    static_cast<unsigned>(replay.frame.frame_index));
       return false;
     }
@@ -689,9 +731,9 @@ class CaptureFileCamera : public LibXR::Application,
   }
 
   /**
-   * @brief JPEG 内录包回放路径。
+   * @brief CameraBase 内录包回放路径。
    *
-   * 按帧索引从 frames bin 中读取 JPEG blob，解码后写入 CameraBase。
+   * 按帧索引从 frames bin 中读取图像载荷，解码后写入 CameraBase。
    */
   void RunPackageReplay()
   {

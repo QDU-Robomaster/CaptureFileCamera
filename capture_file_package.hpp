@@ -37,14 +37,15 @@ struct FrameRecord
 {
   uint64_t frame_index{};  ///< CameraBase 记录时的连续帧号。
   uint64_t timestamp_us{};  ///< 图像传感器侧时间戳，单位微秒。
-  uint64_t offset_bytes{};  ///< 当前 JPEG blob 在 frames.bin 中的起始偏移。
-  uint64_t size_bytes{};  ///< 当前 JPEG blob 的字节数。
+  uint64_t offset_bytes{};  ///< 当前图像载荷在 frames.bin 中的起始偏移。
+  uint64_t size_bytes{};  ///< 当前图像载荷的字节数。
+  std::string codec{};  ///< 可选载荷编码；legacy CSV 为空时由 size 自动推断。
 };
 
 /// 内录包回放时的一条已对齐记录。
 struct PackageReplayFrame
 {
-  FrameRecord frame{};  ///< JPEG 图像位置。
+  FrameRecord frame{};  ///< 图像载荷位置。
   ImuSample imu{};  ///< 与该图像 timestamp 对齐的 IMU。
 };
 
@@ -117,22 +118,88 @@ inline bool ParseImuCsvRow(const std::string& line, ImuSample& sample)
   return true;
 }
 
-/// 解析固定列顺序：frame_index,camera_timestamp_us,offset_bytes,size_bytes。
+inline std::string TrimAscii(std::string value)
+{
+  while (!value.empty() &&
+         std::isspace(static_cast<unsigned char>(value.front())) != 0)
+  {
+    value.erase(value.begin());
+  }
+  while (!value.empty() &&
+         std::isspace(static_cast<unsigned char>(value.back())) != 0)
+  {
+    value.pop_back();
+  }
+  return value;
+}
+
+inline bool StringEqualsIgnoreCase(const std::string& lhs, const char* rhs)
+{
+  std::size_t rhs_len = 0;
+  while (rhs[rhs_len] != '\0')
+  {
+    ++rhs_len;
+  }
+  if (lhs.size() != rhs_len)
+  {
+    return false;
+  }
+  for (std::size_t i = 0; i < lhs.size(); ++i)
+  {
+    char a = lhs[i];
+    char b = rhs[i];
+    if (a >= 'A' && a <= 'Z')
+    {
+      a = static_cast<char>(a - 'A' + 'a');
+    }
+    if (b >= 'A' && b <= 'Z')
+    {
+      b = static_cast<char>(b - 'A' + 'a');
+    }
+    if (a != b)
+    {
+      return false;
+    }
+  }
+  return true;
+}
+
+inline bool CodecIsRaw(const std::string& codec)
+{
+  return StringEqualsIgnoreCase(codec, "raw");
+}
+
+/// 解析列顺序：frame_index,camera_timestamp_us,offset_bytes,size_bytes[,codec]。
 inline bool ParseFrameCsvRow(const std::string& line, FrameRecord& frame)
 {
-  std::array<double, 4> values{};
+  std::array<std::string, 5> tokens{};
   std::stringstream stream(line);
   std::string token;
   std::size_t index = 0;
   while (std::getline(stream, token, ','))
   {
-    if (index >= values.size() || !ParseNumber(token, values[index]))
+    if (index >= tokens.size())
     {
       return false;
     }
+    tokens[index] = token;
     ++index;
   }
-  if (index != values.size() || values[0] < 0.0 || values[1] < 0.0 ||
+  if (index != 4 && index != 5)
+  {
+    return false;
+  }
+
+  std::array<double, 4> values{};
+  for (std::size_t i = 0; i < values.size(); ++i)
+  {
+    if (!ParseNumber(tokens[i], values[i]))
+    {
+      return false;
+    }
+  }
+
+  if (values[0] < 0.0 || values[1] < 0.0 ||
       values[2] < 0.0 || values[3] < 0.0)
   {
     return false;
@@ -142,6 +209,7 @@ inline bool ParseFrameCsvRow(const std::string& line, FrameRecord& frame)
   frame.timestamp_us = static_cast<uint64_t>(std::llround(values[1]));
   frame.offset_bytes = static_cast<uint64_t>(std::llround(values[2]));
   frame.size_bytes = static_cast<uint64_t>(std::llround(values[3]));
+  frame.codec = index == 5 ? TrimAscii(tokens[4]) : std::string{};
   return true;
 }
 
