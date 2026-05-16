@@ -2,7 +2,7 @@
 
 // clang-format off
 /* === MODULE MANIFEST V2 ===
-module_description: 内录文件相机，发布图像与录制姿态数据
+module_description: 文件相机，回放视频图像和 IMU CSV
 constructor_args:
   - runtime:
       file_path: "/home/xiao/data/camera_internal_recording_20260428/damo_clean.avi"
@@ -12,6 +12,8 @@ constructor_args:
       imu_topic_name: "camera_imu"
       realtime: true
       loop: false
+      max_frames: 0
+      replay_speed: 1.0
 template_args:
   - Info:
       width: 1440
@@ -58,38 +60,42 @@ depends:
 
 /**
  * @class CaptureFileCamera
- * @brief 文件相机源，用干净视频和同帧 IMU CSV 按 CameraBase 合约发布数据。
+ * @brief 文件相机，从视频和同序号 IMU CSV 回放数据。
  *
- * 模块只消费清洗后的 capture package：视频文件只包含图像，IMU CSV 显式
- * 给出每帧的 timestamp/quat/gyro/accl。
+ * 视频文件提供图像，IMU CSV 提供每帧的 timestamp、quat、gyro 和 accl。
  */
 template <CameraTypes::CameraInfo CameraInfoV>
 class CaptureFileCamera : public LibXR::Application,
                           public CameraBase<CameraInfoV>
 {
  public:
-  using Self = CaptureFileCamera<CameraInfoV>;
-  using Base = CameraBase<CameraInfoV>;
-  using ImageFrame = typename Base::ImageFrame;
-  using GyroStamped = typename Base::GyroStamped;
-  using AcclStamped = typename Base::AcclStamped;
-  using QuatStamped = typename Base::QuatStamped;
+  using Self = CaptureFileCamera<CameraInfoV>;  ///< 当前模板实例类型。
+  using Base = CameraBase<CameraInfoV>;  ///< CameraBase 基类类型。
+  using ImageFrame = typename Base::ImageFrame;  ///< 图像槽数据类型。
+  using GyroStamped = typename Base::GyroStamped;  ///< gyro topic 数据类型。
+  using AcclStamped = typename Base::AcclStamped;  ///< accl topic 数据类型。
+  using QuatStamped = typename Base::QuatStamped;  ///< quat topic 数据类型。
 
-  // 编译期相机模型来自 BSP YAML 预设。
+  /// 编译期相机信息。
   static inline constexpr auto camera_info = Base::camera_info;
 
-  // 视频图像当前按紧密排列的 BGR8 处理。
+  /// BGR8 图像通道数。
   static constexpr int channel_count = 3;
+  /// 每行字节数。
   static constexpr std::size_t frame_step = static_cast<std::size_t>(camera_info.step);
+  /// 图像宽度。
   static constexpr int frame_width = static_cast<int>(camera_info.width);
+  /// 图像高度。
   static constexpr int frame_height = static_cast<int>(camera_info.height);
 
-  // 时间戳相关常量，避免帧间隔换算里散落魔法数。
+  /// 缺少可用帧间隔时使用的默认间隔，单位微秒。
   static constexpr uint64_t default_period_us = 10000;
+  /// 一秒对应的微秒数。
   static constexpr double microseconds_per_second = 1000000.0;
+  /// 一毫秒对应的微秒数。
   static constexpr uint64_t microseconds_per_millisecond = 1000;
 
-  // OpenCV 解码和图像拷贝不是嵌入式小栈任务，线程栈显式放大。
+  /// OpenCV 解码和图像拷贝线程使用的栈大小。
   static constexpr std::size_t capture_thread_stack_bytes = 256 * 1024;
 
   static_assert(camera_info.encoding == CameraTypes::Encoding::BGR8,
@@ -107,12 +113,13 @@ class CaptureFileCamera : public LibXR::Application,
         "/home/xiao/data/camera_internal_recording_20260428/damo_clean.avi";  ///< 干净视频路径。
     std::string_view imu_csv_path =
         "/home/xiao/data/camera_internal_recording_20260428/damo_imu.csv";  ///< 同帧 IMU CSV。
-    std::string_view camera_name = "camera";  ///< CameraBase 相机名，也是原始 IMU 话题前缀。
-    std::string_view image_topic_name = "camera_image";  ///< 图像话题，供 CameraFrameSync 消费。
-    std::string_view imu_topic_name = "camera_imu";  ///< 同步后 IMU 话题名。
+    std::string_view camera_name = "camera";  ///< 相机实例名，也是原始 IMU topic 前缀。
+    std::string_view image_topic_name = "camera_image";  ///< 图像名称。
+    std::string_view imu_topic_name = "camera_imu";  ///< 同步 IMU 名称。
     bool realtime = true;  ///< 是否按录制帧间隔限速播放。
-    bool loop = false;  ///< EOF 后是否回到第 0 帧继续播放。
+    bool loop = false;  ///< 文件结束后是否回到第 0 帧继续播放。
     uint32_t max_frames = 0;  ///< 0 表示不限帧数，测试可用环境变量覆盖。
+    double replay_speed = 1.0;  ///< 回放速度倍率；1.0 表示原速。
   };
 
   /**
@@ -127,7 +134,15 @@ class CaptureFileCamera : public LibXR::Application,
     std::array<float, 3> accl_xyz{};  ///< 线加速度。
   };
 
-  // 构造阶段先检查文件和分辨率，再启动后台采集线程。
+  /**
+   * @brief 检查输入文件并启动回放线程。
+   *
+   * @param hw 硬件容器，传给 `CameraBase`。
+   * @param app 应用管理器。
+   * @param runtime 运行参数。
+   *
+   * 视频或 CSV 无法打开、格式错误、尺寸不匹配时会抛出 `std::runtime_error`。
+   */
   explicit CaptureFileCamera(LibXR::HardwareContainer& hw,
                              LibXR::ApplicationManager& app,
                              RuntimeParam runtime)
@@ -151,20 +166,34 @@ class CaptureFileCamera : public LibXR::Application,
     app.Register(*this);
   }
 
-  // 通知采集线程在下一轮循环退出。
+  /**
+   * @brief 通知回放线程退出。
+   */
   ~CaptureFileCamera() override { running_.store(false); }
 
+  /**
+   * @brief 打印已提交图像帧数、已发布 IMU 组数和运行状态。
+   */
   void OnMonitor() override
   {
     XR_LOG_INFO("CaptureFileCamera monitor: frames=%u imu=%u running=%d",
                 frames_committed_.load(), imu_published_.load(), running_.load() ? 1 : 0);
   }
 
+  /**
+   * @brief 文件相机不支持曝光设置。
+   */
   void SetExposure(double) override {}
 
+  /**
+   * @brief 文件相机不支持增益设置。
+   */
   void SetGain(double) override {}
 
  private:
+  /**
+   * @brief 解析有限浮点数。
+   */
   static bool ParseNumber(const std::string& token, double& value)
   {
     const char* begin = token.c_str();
@@ -181,7 +210,11 @@ class CaptureFileCamera : public LibXR::Application,
     return *end == '\0' && std::isfinite(value);
   }
 
-  // CSV 列顺序：timestamp_us,qw,qx,qy,qz,gx,gy,gz,ax,ay,az。
+  /**
+   * @brief 解析一行 IMU CSV。
+   *
+   * 列顺序为 `timestamp_us,qw,qx,qy,qz,gx,gy,gz,ax,ay,az`。
+   */
   static bool ParseImuCsvLine(const std::string& line, ImuSample& sample)
   {
     std::array<double, 11> values{};
@@ -211,6 +244,9 @@ class CaptureFileCamera : public LibXR::Application,
     return true;
   }
 
+  /**
+   * @brief 计算当前帧之后的等待时间，单位微秒。
+   */
   uint64_t FramePeriodUsForIndex(std::size_t index) const
   {
     if (index > 0 && index < imu_samples_.size() &&
@@ -221,14 +257,18 @@ class CaptureFileCamera : public LibXR::Application,
     return fallback_period_us_;
   }
 
-  // 校验解码后的图像是否满足 CameraInfo 编译期约束。
+  /**
+   * @brief 检查解码后的图像尺寸和像素字节数。
+   */
   static bool FrameShapeMatches(const cv::Mat& bgr)
   {
     return bgr.cols == frame_width && bgr.rows == frame_height &&
            bgr.elemSize() == channel_count;
   }
 
-  // 环境变量只用于测试限帧/加速，正常配置仍以 YAML 为准。
+  /**
+   * @brief 应用测试用环境变量。
+   */
   void ApplyEnvironmentOverrides()
   {
     if (const char* env = std::getenv("CAPTURE_FILE_CAMERA_MAX_FRAMES"))
@@ -243,9 +283,23 @@ class CaptureFileCamera : public LibXR::Application,
     {
       runtime_.realtime = !(env[0] == '0' && env[1] == '\0');
     }
+    if (const char* env = std::getenv("CAPTURE_FILE_CAMERA_REPLAY_SPEED"))
+    {
+      double parsed = 0.0;
+      if (ParseNumber(env, parsed) && parsed > 0.0)
+      {
+        runtime_.replay_speed = parsed;
+      }
+      else
+      {
+        XR_LOG_WARN("CaptureFileCamera ignored invalid replay speed '%s'", env);
+      }
+    }
   }
 
-  // 构造期预打开一次文件，提前发现路径和分辨率错误。
+  /**
+   * @brief 打开视频文件并检查宽高。
+   */
   void ValidateVideo()
   {
     cv::VideoCapture cap(file_path_);
@@ -273,11 +327,17 @@ class CaptureFileCamera : public LibXR::Application,
 
     const auto fps_milli = static_cast<unsigned>(std::llround(fps * 1000.0));
     const auto period_us = static_cast<unsigned>(fallback_period_us_);
-    XR_LOG_PASS("CaptureFileCamera opened %s: %dx%d fps_milli=%u period_us=%u",
-                file_path_.c_str(), width, height, fps_milli, period_us);
+    const auto speed_milli =
+        static_cast<unsigned>(std::llround(runtime_.replay_speed * 1000.0));
+    XR_LOG_PASS(
+        "CaptureFileCamera opened %s: %dx%d fps_milli=%u period_us=%u realtime=%u replay_speed_milli=%u",
+        file_path_.c_str(), width, height, fps_milli, period_us,
+        runtime_.realtime ? 1U : 0U, speed_milli);
   }
 
-  // 构造期加载显式 IMU 文件，运行时只按帧索引取样。
+  /**
+   * @brief 加载 IMU CSV。
+   */
   void LoadImuCsv()
   {
     std::ifstream input(imu_csv_path_);
@@ -321,7 +381,9 @@ class CaptureFileCamera : public LibXR::Application,
                 static_cast<unsigned>(imu_samples_.size()), imu_csv_path_.c_str());
   }
 
-  // 等 CameraFrameSync 接好图像 sink，避免启动阶段白丢前几帧。
+  /**
+   * @brief 等待图像槽可用。
+   */
   void WaitForImageSink()
   {
     while (running_.load() && !this->ImageSinkReady())
@@ -330,7 +392,9 @@ class CaptureFileCamera : public LibXR::Application,
     }
   }
 
-  // OpenCV 解码结果统一转为 BGR8。
+  /**
+   * @brief 把 OpenCV 解码结果转换成 BGR8。
+   */
   bool ConvertToBgr(const cv::Mat& decoded, cv::Mat& bgr)
   {
     if (decoded.empty())
@@ -357,7 +421,9 @@ class CaptureFileCamera : public LibXR::Application,
     return false;
   }
 
-  // 先发布原始 IMU，再提交图像，便于 LATEST_IMU 模式拿到同帧数据。
+  /**
+   * @brief 发布一组原始 IMU 数据。
+   */
   void PublishRawImu(const ImuSample& sample)
   {
     GyroStamped gyro_msg{
@@ -379,7 +445,9 @@ class CaptureFileCamera : public LibXR::Application,
     imu_published_.fetch_add(1);
   }
 
-  // 把 BGR 图像写入 CameraBase 租借区并提交。
+  /**
+   * @brief 把 BGR 图像写入当前可写槽位并提交。
+   */
   bool WriteAndCommitImage(const cv::Mat& bgr, uint64_t timestamp_us)
   {
     if (!this->ImageSinkReady())
@@ -411,7 +479,9 @@ class CaptureFileCamera : public LibXR::Application,
     return true;
   }
 
-  // 单帧处理：读显式 IMU、提交图像、按需限速。
+  /**
+   * @brief 处理一帧图像和对应 IMU 数据。
+   */
   bool ProcessFrame(const cv::Mat& decoded, const ImuSample& imu, uint64_t period_us)
   {
     cv::Mat bgr;
@@ -430,15 +500,22 @@ class CaptureFileCamera : public LibXR::Application,
 
     if (runtime_.realtime)
     {
-      const uint64_t sleep_ms =
-          std::max<uint64_t>(1U, period_us / microseconds_per_millisecond);
+      const double scaled_ms =
+          static_cast<double>(period_us) /
+          (static_cast<double>(microseconds_per_millisecond) *
+           runtime_.replay_speed);
+      const uint64_t sleep_ms = std::max<uint64_t>(
+          1U, static_cast<uint64_t>(std::ceil(std::min<double>(
+                  scaled_ms, static_cast<double>(UINT32_MAX)))));
       LibXR::Thread::Sleep(static_cast<uint32_t>(sleep_ms));
     }
 
     return committed;
   }
 
-  // 采集线程主循环；loop 模式下视频和 IMU 索引一起回到起点。
+  /**
+   * @brief 回放线程主循环。
+   */
   void CaptureLoop()
   {
     WaitForImageSink();
@@ -494,24 +571,27 @@ class CaptureFileCamera : public LibXR::Application,
     }
   }
 
+  /**
+   * @brief `LibXR::Thread` 入口。
+   */
   static void CaptureThreadMain(Self* self) { self->CaptureLoop(); }
 
  private:
-  std::string file_path_{};  ///< RuntimeParam 是 string_view，这里持有路径副本。
-  std::string imu_csv_path_{};  ///< 显式 IMU CSV 路径副本。
+  std::string file_path_{};  ///< 视频文件路径。
+  std::string imu_csv_path_{};  ///< IMU CSV 路径。
 
-  RuntimeParam runtime_{};  ///< 应用环境变量覆盖后的运行时参数。
-  std::vector<ImuSample> imu_samples_{};  ///< 与视频帧按索引对应的 IMU 数据。
+  RuntimeParam runtime_{};  ///< 运行参数。
+  std::vector<ImuSample> imu_samples_{};  ///< 按帧序号索引的 IMU 数据。
 
   LibXR::RuntimeStringView<> gyro_topic_name_{};  ///< `<camera_name>_gyro`。
   LibXR::RuntimeStringView<> accl_topic_name_{};  ///< `<camera_name>_accl`。
   LibXR::RuntimeStringView<> quat_topic_name_{};  ///< `<camera_name>_quat`。
 
-  LibXR::Topic raw_gyro_topic_{};  ///< CameraFrameSync 消费的原始陀螺话题。
-  LibXR::Topic raw_accl_topic_{};  ///< CameraFrameSync 消费的原始加速度话题。
-  LibXR::Topic raw_quat_topic_{};  ///< CameraFrameSync 消费的原始姿态话题。
+  LibXR::Topic raw_gyro_topic_{};  ///< gyro topic。
+  LibXR::Topic raw_accl_topic_{};  ///< accl topic。
+  LibXR::Topic raw_quat_topic_{};  ///< quat topic。
 
-  LibXR::Thread capture_thread_{};  ///< 解码和发布线程。
+  LibXR::Thread capture_thread_{};  ///< 回放线程。
 
   std::atomic<bool> running_{false};  ///< 采集线程退出标志。
 
