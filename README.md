@@ -1,58 +1,76 @@
 # CaptureFileCamera
 
-`CaptureFileCamera` 是内录文件相机模块，用一份清洗后的 capture package
-复现相机输入。它发布图像和原始 IMU 话题，后级仍然通过
-`CameraFrameSync` 产出同步后的 `camera_imu`。
+`CaptureFileCamera` 是文件回放相机。它从录制文件读取图像和 IMU 数据，按原始
+timestamp 发布给 `CameraFrameSync`，用于复现实机相机输入、调试同步、回归视觉流程。
 
-这个模块用于回放调试，不模拟 Hik 实机的硬件触发延迟，也不从图像像素里解析私有元数据。
+模块支持两种输入：
 
-## 输入文件
+- 普通视频 + IMU CSV。
+- 帧索引 CSV + 帧数据 bin + IMU CSV。
 
-运行时通常传入两份文件：
+它不模拟 Hik 相机触发延迟，也不从图像像素中读取额外信息。
 
-- `file_path`：干净视频文件，只包含图像。
-- `imu_csv_path`：与视频帧一一对应的 IMU CSV。
+## 运行参数
 
-默认路径只是占位值：
+`runtime` 参数由 BSP YAML 传入：
 
-- `capture.avi`
-- `capture_imu.csv`
+- `file_path`：普通视频路径，或者帧数据 bin 路径。
+- `imu_csv_path`：IMU CSV 路径。
+- `frame_csv_path`：帧索引 CSV 路径；为空时按普通视频回放。
+- `camera_name`：相机名，也是原始 IMU 话题前缀。
+- `image_topic_name`：图像话题名，默认 `camera_image`。
+- `imu_topic_name`：同步后 IMU 话题名，默认 `camera_imu`。
+- `realtime`：为 `true` 时按录制 timestamp 控制回放速度。
+- `loop`：为 `true` 时播放到文件末尾后重新开始。
+- `max_frames`：最大提交帧数，`0` 表示不限制。
 
-BSP 或测试配置应按实际数据包路径覆盖它们。
+测试环境可以用环境变量覆盖部分参数：
 
-也可以直接回放 `CameraBase` 生产者侧内录包：
+- `CAPTURE_FILE_CAMERA_MAX_FRAMES`：限制本次回放提交的图像帧数。
+- `CAPTURE_FILE_CAMERA_REALTIME=0`：关闭实时限速。
 
-- `file_path`：`<stem>_frames.bin`，内部是顺序追加的图像载荷。
-- `frame_csv_path`：`<stem>_frames.csv`
-- `imu_csv_path`：`<stem>_imu.csv`
+## 普通视频
 
-`frame_csv_path` 非空时进入内录包模式。模块按 `*_frames.csv` 中的
-`camera_timestamp_us` 和 `*_imu.csv` 的 `timestamp_us` 对齐，只回放已经有同步
-IMU 的图像，自动跳过启动同步前的图像帧。
+普通视频模式使用 `file_path` 和 `imu_csv_path`。视频只保存图像，IMU CSV 每一行对应
+一帧图像。模块按帧序号同时发布一组原始 IMU 和一帧图像。
 
-内录包设计允许比赛中直接断电。正常路径由 `CameraBase` 在下次启动时整理
-`.recording` 标记和 `.tmp` 目录；本模块额外容忍 CSV 最后一行被截断的情况，只忽略
-尾部半行，不吞掉中间坏行。
+视频解码后会转换为 BGR8，再写入 `CameraBase` 的图像缓冲区。当前要求：
 
-## 视频格式
+- 分辨率等于模板参数 `CameraInfo::width / height`。
+- `CameraInfo::encoding` 为 `BGR8`。
+- `CameraInfo::step == CameraInfo::width * 3`，即每行是紧密排列的 BGR8 字节。
+- OpenCV 解码结果可以是 `CV_8UC3`、`CV_8UC4` 或 `CV_8UC1`。
 
-视频解码后会统一转换为 BGR8，再写入 `CameraBase` 图像槽位。
-CSV 解析和视频转换的格式处理集中在 `capture_file_package.hpp`，主模块只负责发布。
+如果 `realtime = true`，相邻 IMU timestamp 的差值用于控制回放间隔。无法得到有效
+差值时，使用视频 FPS 推导间隔。这个限速只影响播放速度，不改变发布 timestamp。
 
-当前要求：
+## 帧数据 Bin
 
-- 分辨率必须等于模板参数里的 `CameraInfo::width / height`。
-- 行跨度必须满足紧密 BGR8：`step = width * 3`。
-- 支持 OpenCV 解码出的 `CV_8UC3`、`CV_8UC4` 和 `CV_8UC1`。
+`frame_csv_path` 非空时使用帧数据 bin 模式：
 
-如果 `realtime = true`，模块按相邻 CSV 时间戳差值限速播放；
-缺少有效相邻差值时，使用视频 FPS 推导的周期。这里的限速只控制回放节奏，
-不参与同步判定。
+- `file_path` 指向 `*_frames.bin`。
+- `frame_csv_path` 指向 `*_frames.csv`。
+- `imu_csv_path` 指向 `*_imu.csv`。
 
-## IMU CSV 格式
+帧索引 CSV 列顺序为：
 
-视频模式下每一行对应一帧视频。内录包模式下每一行对应一个已经同步成功的
-图像 timestamp。列顺序固定为：
+```text
+frame_index,camera_timestamp_us,offset_bytes,size_bytes[,codec]
+```
+
+`offset_bytes` 和 `size_bytes` 指向 bin 文件中的一帧图像。`codec` 可选：
+
+- `png`：PNG 无损图像。
+- `jpg` / `jpeg`：JPEG 图像。
+- `raw`：未压缩 BGR8 字节，大小必须等于 `CameraBase::image_bytes`。
+- 空：按大小判断；等于 `CameraBase::image_bytes` 时按 `raw`，否则交给 OpenCV 解码。
+
+模块用 `camera_timestamp_us` 和 IMU CSV 的 `timestamp_us` 对齐，只播放能找到同 timestamp
+IMU 的图像帧。CSV 最后一行如果因为录制结束被截断，会被忽略；中间行解析失败会直接报错。
+
+## IMU CSV
+
+IMU CSV 列顺序为：
 
 ```text
 timestamp_us,qw,qx,qy,qz,gx,gy,gz,ax,ay,az
@@ -60,56 +78,29 @@ timestamp_us,qw,qx,qy,qz,gx,gy,gz,ax,ay,az
 
 字段含义：
 
-- `timestamp_us`：传感器侧采样时间戳，单位微秒。
+- `timestamp_us`：传感器时间戳，单位微秒。
 - `qw,qx,qy,qz`：姿态四元数，顺序为 `wxyz`。
 - `gx,gy,gz`：角速度，单位 `rad/s`。
 - `ax,ay,az`：线加速度，单位 `m/s^2`。
 
-CSV 可以包含空行、以 `#` 开头的注释行，以及一行表头。第一条有效数据之后，
-任何无法解析的行都会被视为数据错误并中止初始化。
+CSV 可以包含空行、以 `#` 开头的注释行，以及一行表头。第一条有效数据之后，无法解析的
+行会让模块停止初始化。
 
-## Frame CSV 格式
+## 输出
 
-`CameraBase` 生产者侧内录包的帧索引列顺序为：
+图像写入 `CameraBase` 图像缓冲区，并发布到 `image_topic_name`。
 
-```text
-frame_index,camera_timestamp_us,offset_bytes,size_bytes[,codec]
-```
+原始 IMU 按 `camera_name` 生成三个话题，Topic timestamp 使用 CSV 的 `timestamp_us`：
 
-`file_path` 指向同一 stem 的 `*_frames.bin`。每条 frame record 的
-`offset_bytes,size_bytes` 指向一帧完整图像载荷。新包会写出 `codec` 列，默认
-`png`，表示 PNG 无损压缩；`raw` 表示未压缩 BGR8 原始字节。
+- `<camera_name>_gyro`：`Eigen::Matrix<float, 3, 1>`。
+- `<camera_name>_accl`：`Eigen::Matrix<float, 3, 1>`。
+- `<camera_name>_quat`：`LibXR::Quaternion<float>`。
 
-兼容规则：
+同步后的 `imu_topic_name` 由 `CameraFrameSync` 发布，`CaptureFileCamera` 只发布原始
+IMU。
 
-- 有 `codec=png` 或 `codec=jpg/jpeg` 时，用 OpenCV `imdecode` 解码。
-- 有 `codec=raw` 时，按 `CameraInfo` 的紧密 BGR8 原始字节读取。
-- legacy CSV 没有 `codec` 列时，`size_bytes == image_bytes` 推断为 raw，
-  否则按编码图像载荷自动解码，因此旧 JPEG 包仍可回放。
+## 典型用途
 
-## 输出话题
-
-图像通过 `CameraBase` 的共享图像槽位发布：
-
-- `image_topic_name`：默认 `camera_image`
-
-原始 IMU 通过普通 Topic 发布，Topic timestamp 使用 CSV 中的 `timestamp_us`。
-payload 只包含测量值：
-
-- `<camera_name>_gyro`：`Eigen::Matrix<float, 3, 1>`
-- `<camera_name>_accl`：`Eigen::Matrix<float, 3, 1>`
-- `<camera_name>_quat`：`LibXR::Quaternion<float>`，CSV 输入仍按 `wxyz` 顺序构造。
-
-同步后的 `imu_topic_name` 由 `CameraFrameSync` 发布，本模块不直接发布同步 IMU。
-
-## 手动标定回归
-
-本仓库的 `Manual ChArUco Calibration Replay` GitHub Actions workflow 用三段
-ChArUco 录制视频回放 `CaptureFileCamera`，并调用 `CameraBase` 的 `cali`
-命令保存标定结果。workflow 会检查 `calibration.yml` 的视角数/RMS，也会检查
-`quality_report.txt` 中的质量总判定和重投影判定。标定算法仍归属 `CameraBase`；
-这里验证内录文件相机能稳定复现这条输入链路。
-
-默认视频资产来自仓库 release `charuco-calib-videos-20260504`。手动触发 workflow
-时可以覆盖 `video_base_url`、`CameraBase` / `CameraFrameSync` / `CameraSync`
-以及 `libxr` 的依赖 ref。
+- 用实机录制文件复现相机输入。
+- 调试 `CameraFrameSync` 的图像和 IMU 对齐。
+- 在 CI 或本地回放固定数据，检查检测、跟踪、预览等模块是否还能稳定运行。

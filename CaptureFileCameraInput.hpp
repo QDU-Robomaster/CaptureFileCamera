@@ -3,6 +3,7 @@
 #include <array>
 #include <cctype>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <sstream>
@@ -21,8 +22,8 @@ static constexpr uint64_t microseconds_per_millisecond = 1000;
 /**
  * @brief CSV 中的一帧传感器记录。
  *
- * `timestamp_us` 是传感器侧采样时间戳。发布原始 gyro/accl/quat 时，
- * 该值写入 Topic timestamp，payload 只携带测量数组。
+ * `timestamp_us` 是传感器侧采样时间戳。发布原始 gyro/accl/quat 时，该值写入
+ * Topic timestamp，消息内容只携带测量数组。
  */
 struct ImuSample
 {
@@ -32,20 +33,20 @@ struct ImuSample
   std::array<float, 3> accl_xyz{};  ///< 线加速度，单位 m/s^2。
 };
 
-/// CameraBase 内录帧索引。
+/// 帧数据 bin 的索引记录。
 struct FrameRecord
 {
-  uint64_t frame_index{};  ///< CameraBase 记录时的连续帧号。
+  uint64_t frame_index{};  ///< 录制时的连续帧号。
   uint64_t timestamp_us{};  ///< 图像传感器侧时间戳，单位微秒。
-  uint64_t offset_bytes{};  ///< 当前图像载荷在 frames.bin 中的起始偏移。
-  uint64_t size_bytes{};  ///< 当前图像载荷的字节数。
-  std::string codec{};  ///< 可选载荷编码；legacy CSV 为空时由 size 自动推断。
+  uint64_t offset_bytes{};  ///< 当前图像在 frames.bin 中的起始偏移。
+  uint64_t size_bytes{};  ///< 当前图像的字节数。
+  std::string codec{};  ///< 可选图像编码；为空时由大小自动判断。
 };
 
-/// 内录包回放时的一条已对齐记录。
-struct PackageReplayFrame
+/// 帧数据 bin 回放时的一条已对齐记录。
+struct FrameBinReplayFrame
 {
-  FrameRecord frame{};  ///< 图像载荷位置。
+  FrameRecord frame{};  ///< 图像位置。
   ImuSample imu{};  ///< 与该图像 timestamp 对齐的 IMU。
 };
 
@@ -236,5 +237,15 @@ inline bool ConvertToBgr(const cv::Mat& decoded, cv::Mat& bgr)
     return true;
   }
   return false;
+}
+
+/// 判断一条帧索引记录是否是未压缩 BGR8。
+inline bool FrameRecordIsRawBgr(const FrameRecord& frame, std::size_t image_bytes)
+{
+  if (CodecIsRaw(frame.codec))
+  {
+    return true;
+  }
+  return frame.codec.empty() && frame.size_bytes == image_bytes;
 }
 }  // namespace CaptureFileCameraDetail
