@@ -2,10 +2,11 @@
 
 // clang-format off
 /* === MODULE MANIFEST V2 ===
-module_description: 文件回放相机，发布视频帧与原始 IMU 数据
+module_description: 文件回放相机，发布统一 raw frame-bin 内录包与原始 IMU 数据
 constructor_args:
   - runtime:
-      file_path: "capture.avi"
+      file_path: "capture_frames.bin"
+      frame_csv_path: "capture_frames.csv"
       imu_csv_path: "capture_imu.csv"
       camera_name: "camera"
       image_topic_name: "camera_image"
@@ -13,7 +14,6 @@ constructor_args:
       realtime: true
       loop: false
       max_frames: 0
-      frame_csv_path: ""
 template_args:
   - Info:
       width: 1440
@@ -54,7 +54,6 @@ depends:
 #include "app_framework.hpp"
 #include "CaptureFileCameraFrameBin.hpp"
 #include "CaptureFileCameraInput.hpp"
-#include "CaptureFileCameraVideo.hpp"
 #include "libxr.hpp"
 #include "libxr_string.hpp"
 #include "logger.hpp"
@@ -63,9 +62,10 @@ depends:
 
 /**
  * @class CaptureFileCamera
- * @brief 文件相机源，用普通视频或帧数据 bin 按 CameraBase 接口发布数据。
+ * @brief 文件相机源，用统一 raw frame-bin 内录包按 CameraBase 接口发布数据。
  *
- * 视频文件只包含图像，IMU CSV 显式给出每帧的 timestamp/quat/gyro/accl。
+ * 当前仓库口径中，`CaptureFileCamera` 只接受：
+ * `frames.bin + frames.csv + imu.csv`，其中图像帧必须是未压缩 `BGR8 raw`。
  */
 template <CameraTypes::CameraInfo CameraInfoV>
 class CaptureFileCamera : public LibXR::Application,
@@ -123,15 +123,15 @@ class CaptureFileCamera : public LibXR::Application,
    */
   struct RuntimeParam
   {
-    std::string_view file_path = "capture.avi";  ///< 视频路径或帧数据 bin 路径。
-    std::string_view imu_csv_path = "capture_imu.csv";  ///< 同帧 IMU CSV。
+    std::string_view file_path = "capture_frames.bin";  ///< 帧数据 bin 路径。
+    std::string_view frame_csv_path = "capture_frames.csv";  ///< 统一 raw frame-bin 包的帧索引 CSV。
+    std::string_view imu_csv_path = "capture_imu.csv";  ///< 与 frames.csv 同步对齐的 IMU CSV。
     std::string_view camera_name = "camera";  ///< CameraBase 相机名，也是原始 IMU 话题前缀。
     std::string_view image_topic_name = "camera_image";  ///< 图像话题，供 CameraFrameSync 消费。
     std::string_view imu_topic_name = "camera_imu";  ///< 同步后 IMU 话题名。
     bool realtime = true;  ///< 是否按录制帧间隔限速播放。
     bool loop = false;  ///< EOF 后是否回到第 0 帧继续播放。
     uint32_t max_frames = 0;  ///< 0 表示不限帧数，测试可用环境变量覆盖。
-    std::string_view frame_csv_path = "";  ///< 非空时按帧数据 bin 回放。
   };
 
   /**
@@ -157,17 +157,12 @@ class CaptureFileCamera : public LibXR::Application,
         raw_quat_topic_(LibXR::Topic::FindOrCreate<QuatSample>(quat_topic_name_.CStr()))
   {
     ApplyEnvironmentOverrides();
+    ValidateReplayPackageMode();
     LoadImuCsv();
-    if (IsFrameBinMode())
-    {
-      LoadFrameCsv();
-      BuildFrameBinReplayPlan();
-      ValidateFrameBin();
-    }
-    else
-    {
-      ValidateVideo();
-    }
+    LoadFrameCsv();
+    ValidateFrameRecordsAreRawBgr();
+    BuildFrameBinReplayPlan();
+    ValidateFrameBin();
     running_.store(true);
     capture_thread_ = std::thread(CaptureThreadMain, this);
     app.Register(*this);
@@ -190,8 +185,21 @@ class CaptureFileCamera : public LibXR::Application,
    */
   void OnMonitor() override
   {
-    XR_LOG_INFO("CaptureFileCamera monitor: frames=%u imu=%u running=%d",
-                frames_committed_.load(), imu_published_.load(), running_.load() ? 1 : 0);
+    const uint64_t read_us = video_read_time_us_accum_.exchange(0);
+    const uint64_t bgr_us = bgr_convert_time_us_accum_.exchange(0);
+    const uint64_t imu_us = imu_publish_time_us_accum_.exchange(0);
+    const uint64_t commit_us = image_commit_time_us_accum_.exchange(0);
+    const uint64_t sleep_us = replay_sleep_time_us_accum_.exchange(0);
+    const uint32_t period_frames = period_frames_committed_.exchange(0);
+    const double denom = period_frames == 0U ? 1.0 : static_cast<double>(period_frames);
+    XR_LOG_INFO(
+        "CaptureFileCamera monitor: frames=%u imu=%u running=%d period_frames=%u read_ms=%.3f bgr_ms=%.3f imu_ms=%.3f commit_ms=%.3f sleep_ms=%.3f",
+        frames_committed_.load(), imu_published_.load(), running_.load() ? 1 : 0,
+        period_frames, static_cast<double>(read_us) / 1000.0 / denom,
+        static_cast<double>(bgr_us) / 1000.0 / denom,
+        static_cast<double>(imu_us) / 1000.0 / denom,
+        static_cast<double>(commit_us) / 1000.0 / denom,
+        static_cast<double>(sleep_us) / 1000.0 / denom);
   }
 
   /**
@@ -216,7 +224,7 @@ class CaptureFileCamera : public LibXR::Application,
     {
       return samples[index].timestamp_us - samples[index - 1].timestamp_us;
     }
-    return video_info_.fallback_period_us;
+    return CaptureFileCameraDetail::default_period_us;
   }
 
   /**
@@ -225,18 +233,50 @@ class CaptureFileCamera : public LibXR::Application,
   bool IsFrameBinMode() const { return !frame_csv_path_.empty(); }
 
   /**
+   * @brief 当前统一内录回放必须提供 raw `frames.bin + frames.csv + imu.csv`。
+   */
+  void ValidateReplayPackageMode() const
+  {
+    if (!IsFrameBinMode())
+    {
+      XR_LOG_ERROR("CaptureFileCamera legacy video replay is disabled; use raw frame-bin package instead");
+      throw std::runtime_error("CaptureFileCamera: frame_csv_path is required");
+    }
+  }
+
+  /**
    * @brief 按录制间隔限速；非实时模式直接返回。
    */
-  void SleepReplayPeriod(uint64_t period_us) const
+  void SleepReplayPeriodUntil(uint64_t target_timestamp_us)
   {
     if (!runtime_.realtime)
     {
       return;
     }
 
-    const uint64_t sleep_ms = std::max<uint64_t>(
-        1U, period_us / CaptureFileCameraDetail::microseconds_per_millisecond);
+    const uint64_t now_us =
+        static_cast<uint64_t>(LibXR::Thread::GetTime()) *
+        CaptureFileCameraDetail::microseconds_per_millisecond;
+    if (target_timestamp_us <= now_us)
+    {
+      return;
+    }
+
+    const uint64_t remaining_us = target_timestamp_us - now_us;
+    const uint64_t sleep_ms =
+        remaining_us / CaptureFileCameraDetail::microseconds_per_millisecond;
+    if (sleep_ms == 0U)
+    {
+      return;
+    }
+    const auto sleep_begin = std::chrono::steady_clock::now();
     LibXR::Thread::Sleep(static_cast<uint32_t>(sleep_ms));
+    const auto sleep_end = std::chrono::steady_clock::now();
+    replay_sleep_time_us_accum_.fetch_add(
+        static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                sleep_end - sleep_begin)
+                .count()));
   }
 
   /**
@@ -267,31 +307,6 @@ class CaptureFileCamera : public LibXR::Application,
     {
       runtime_.realtime = !(env[0] == '0' && env[1] == '\0');
     }
-  }
-
-  /**
-   * @brief 构造期预打开视频文件，提前发现路径和分辨率错误。
-   */
-  void ValidateVideo()
-  {
-    if (!CaptureFileCameraDetail::ReadVideoInfo(file_path_, video_info_))
-    {
-      XR_LOG_ERROR("CaptureFileCamera failed to open '%s'", file_path_.c_str());
-      throw std::runtime_error("CaptureFileCamera: failed to open file");
-    }
-
-    if (video_info_.width != frame_width || video_info_.height != frame_height)
-    {
-      XR_LOG_ERROR("CaptureFileCamera geometry mismatch: file=%dx%d constexpr=%dx%d",
-                   video_info_.width, video_info_.height, frame_width, frame_height);
-      throw std::runtime_error("CaptureFileCamera: geometry mismatch");
-    }
-
-    const auto fps_milli = static_cast<unsigned>(std::llround(video_info_.fps * 1000.0));
-    const auto period_us = static_cast<unsigned>(video_info_.fallback_period_us);
-    XR_LOG_PASS("CaptureFileCamera opened %s: %dx%d fps_milli=%u period_us=%u",
-                file_path_.c_str(), video_info_.width, video_info_.height, fps_milli,
-                period_us);
   }
 
   /**
@@ -401,6 +416,25 @@ class CaptureFileCamera : public LibXR::Application,
   }
 
   /**
+   * @brief 统一内录包只允许未压缩 `BGR8 raw` 图像帧。
+   */
+  void ValidateFrameRecordsAreRawBgr() const
+  {
+    for (const auto& frame : frame_records_)
+    {
+      if (!CaptureFileCameraDetail::FrameRecordIsRawBgr(frame, Base::image_bytes))
+      {
+        XR_LOG_ERROR(
+            "CaptureFileCamera only accepts raw BGR8 frame records: frame=%u codec=%s size=%u expected=%u",
+            static_cast<unsigned>(frame.frame_index), frame.codec.c_str(),
+            static_cast<unsigned>(frame.size_bytes),
+            static_cast<unsigned>(Base::image_bytes));
+        throw std::runtime_error("CaptureFileCamera: non-raw frame record");
+      }
+    }
+  }
+
+  /**
    * @brief 将帧索引和 IMU CSV 按 timestamp 对齐成回放计划。
    */
   void BuildFrameBinReplayPlan()
@@ -481,6 +515,7 @@ class CaptureFileCamera : public LibXR::Application,
    */
   void PublishRawImu(const ImuSample& sample)
   {
+    const auto publish_begin = std::chrono::steady_clock::now();
     ImuVector gyro_msg;
     ImuVector accl_msg;
     gyro_msg << sample.gyro_xyz[0], sample.gyro_xyz[1], sample.gyro_xyz[2];
@@ -493,6 +528,12 @@ class CaptureFileCamera : public LibXR::Application,
     raw_accl_topic_.Publish(accl_msg, timestamp);
     raw_quat_topic_.Publish(quat_msg, timestamp);
     imu_published_.fetch_add(1);
+    const auto publish_end = std::chrono::steady_clock::now();
+    imu_publish_time_us_accum_.fetch_add(
+        static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                publish_end - publish_begin)
+                .count()));
   }
 
   /**
@@ -500,6 +541,7 @@ class CaptureFileCamera : public LibXR::Application,
    */
   bool WriteAndCommitImage(const cv::Mat& bgr, uint64_t timestamp_us)
   {
+    const auto commit_begin = std::chrono::steady_clock::now();
     if (!this->ImageSinkReady())
     {
       return false;
@@ -513,10 +555,17 @@ class CaptureFileCamera : public LibXR::Application,
     }
 
     image->timestamp_us = timestamp_us;
-    for (int row = 0; row < frame_height; ++row)
+    if (bgr.isContinuous())
     {
-      std::memcpy(image->data.data() + static_cast<std::size_t>(row) * frame_step,
-                  bgr.ptr(row), frame_step);
+      std::memcpy(image->data.data(), bgr.data, Base::image_bytes);
+    }
+    else
+    {
+      for (int row = 0; row < frame_height; ++row)
+      {
+        std::memcpy(image->data.data() + static_cast<std::size_t>(row) * frame_step,
+                    bgr.ptr(row), frame_step);
+      }
     }
 
     if (!this->CommitImage())
@@ -526,6 +575,13 @@ class CaptureFileCamera : public LibXR::Application,
     }
 
     frames_committed_.fetch_add(1);
+    period_frames_committed_.fetch_add(1);
+    const auto commit_end = std::chrono::steady_clock::now();
+    image_commit_time_us_accum_.fetch_add(
+        static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                commit_end - commit_begin)
+                .count()));
     return true;
   }
 
@@ -564,92 +620,6 @@ class CaptureFileCamera : public LibXR::Application,
   }
 
   /**
-   * @brief 处理视频模式的一帧图像。
-   *
-   * 按同一帧索引发布 IMU 和图像；限速只复现回放节奏。
-   */
-  bool ProcessVideoFrame(const cv::Mat& decoded, const ImuSample& imu,
-                         uint64_t period_us)
-  {
-    cv::Mat bgr;
-    if (!CaptureFileCameraDetail::ConvertToBgr(decoded, bgr))
-    {
-      XR_LOG_ERROR("CaptureFileCamera unsupported cv type=%d", decoded.type());
-      return false;
-    }
-    if (!FrameShapeMatches(bgr))
-    {
-      XR_LOG_ERROR("CaptureFileCamera decoded frame shape mismatch");
-      return false;
-    }
-
-    PublishRawImu(imu);
-    const bool committed = WriteAndCommitImage(bgr, imu.timestamp_us);
-
-    SleepReplayPeriod(period_us);
-
-    return committed;
-  }
-
-  /**
-   * @brief 视频回放路径：OpenCV 解码图像，IMU CSV 按帧索引对齐。
-   */
-  void RunVideoReplay()
-  {
-    WaitForImageSink();
-    CaptureFileCameraDetail::VideoInput video;
-    if (!video.Open(file_path_))
-    {
-      XR_LOG_ERROR("CaptureFileCamera failed to open '%s' in worker", file_path_.c_str());
-      running_.store(false);
-      return;
-    }
-
-    cv::Mat decoded;
-    std::size_t frame_index = 0;
-    while (running_.load())
-    {
-      if (frame_index >= imu_samples_.size())
-      {
-        XR_LOG_PASS("CaptureFileCamera reached IMU EOF after %u committed frames",
-                    frames_committed_.load());
-        if (!runtime_.loop)
-        {
-          running_.store(false);
-          break;
-        }
-        video.Rewind();
-        frame_index = 0;
-        continue;
-      }
-
-      if (!video.Read(decoded))
-      {
-        XR_LOG_PASS("CaptureFileCamera reached EOF after %u committed frames",
-                    frames_committed_.load());
-        if (!runtime_.loop)
-        {
-          running_.store(false);
-          break;
-        }
-        video.Rewind();
-        frame_index = 0;
-        continue;
-      }
-
-      const uint64_t period_us = ReplayPeriodUsForIndex(frame_index);
-      (void)ProcessVideoFrame(decoded, imu_samples_[frame_index], period_us);
-      ++frame_index;
-      if (runtime_.max_frames != 0U && frames_committed_.load() >= runtime_.max_frames)
-      {
-        XR_LOG_PASS("CaptureFileCamera reached max_frames=%u", runtime_.max_frames);
-        running_.store(false);
-        break;
-      }
-    }
-  }
-
-  /**
    * @brief 帧数据 bin 回放路径。
    *
    * 按帧索引从 frames bin 中读取图像，解码后写入 CameraBase。
@@ -667,6 +637,12 @@ class CaptureFileCamera : public LibXR::Application,
     }
 
     std::size_t frame_index = 0;
+    const uint64_t wall_start_us =
+        static_cast<uint64_t>(LibXR::Thread::GetTime()) *
+        CaptureFileCameraDetail::microseconds_per_millisecond;
+    const uint64_t replay_start_us = frame_bin_replay_frames_.empty()
+                                         ? 0U
+                                         : frame_bin_replay_frames_.front().imu.timestamp_us;
     while (running_.load())
     {
       if (frame_index >= frame_bin_replay_frames_.size())
@@ -691,7 +667,13 @@ class CaptureFileCamera : public LibXR::Application,
         break;
       }
 
-      SleepReplayPeriod(ReplayPeriodUsForIndex(frame_index));
+      if (runtime_.realtime && replay_start_us != 0U)
+      {
+        const uint64_t target_wall_us =
+            wall_start_us +
+            (replay.imu.timestamp_us - replay_start_us);
+        SleepReplayPeriodUntil(target_wall_us);
+      }
 
       ++frame_index;
       if (runtime_.max_frames != 0U && frames_committed_.load() >= runtime_.max_frames)
@@ -708,14 +690,7 @@ class CaptureFileCamera : public LibXR::Application,
    */
   void RunReplay()
   {
-    if (IsFrameBinMode())
-    {
-      RunFrameBinReplay();
-    }
-    else
-    {
-      RunVideoReplay();
-    }
+    RunFrameBinReplay();
   }
 
   /**
@@ -747,8 +722,13 @@ class CaptureFileCamera : public LibXR::Application,
   std::atomic<bool> running_{false};  ///< 采集线程退出标志。
 
   std::atomic<uint32_t> frames_committed_{0};  ///< 已提交图像帧数。
+  std::atomic<uint32_t> period_frames_committed_{0};  ///< 本监控周期已提交图像帧数。
 
   std::atomic<uint32_t> imu_published_{0};  ///< 已发布原始 IMU 组数。
+  std::atomic<uint64_t> video_read_time_us_accum_{0};  ///< 本监控周期视频读取耗时。
+  std::atomic<uint64_t> bgr_convert_time_us_accum_{0};  ///< 本监控周期 BGR 转换耗时。
+  std::atomic<uint64_t> imu_publish_time_us_accum_{0};  ///< 本监控周期 IMU 发布耗时。
+  std::atomic<uint64_t> image_commit_time_us_accum_{0};  ///< 本监控周期图像写入提交耗时。
+  std::atomic<uint64_t> replay_sleep_time_us_accum_{0};  ///< 本监控周期限速睡眠耗时。
 
-  CaptureFileCameraDetail::VideoInfo video_info_{};  ///< 视频几何和限速回退周期。
 };
