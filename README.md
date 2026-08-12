@@ -11,6 +11,17 @@
 
 它不模拟 Hik 相机触发延迟，也不从图像像素中读取额外信息。
 
+## 相机几何
+
+- 模板参数 `Layout` 固定帧缓冲区宽高、步长和 BGR8 编码。
+- 构造参数 `calibration` 是原生传感器坐标系下的固定 `CameraCalibration`。
+- `runtime.geometry` 是本次回放固定使用的 `FrameGeometry`，会按值复制到每个
+  `ImageFrame`。
+
+构造时会验证 geometry 的非零 `epoch`、尺寸、步长、下采样、ROI 和原生边界。内录包的
+像素布局必须与 `Layout` 一致；wide 回放使用原生 `1440x1080` 标定和 `720x540`、2x2
+下采样几何。
+
 ## 运行参数
 
 `runtime` 参数由 BSP YAML 传入：
@@ -24,6 +35,7 @@
 - `realtime`：为 `true` 时按录制 timestamp 控制回放速度。
 - `loop`：为 `true` 时播放到文件末尾后重新开始。
 - `max_frames`：最大提交帧数，`0` 表示不限制。
+- `geometry`：帧坐标到原生传感器坐标的固定映射。
 
 测试环境可以用环境变量覆盖部分参数：
 

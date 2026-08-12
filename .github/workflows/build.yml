@@ -82,19 +82,57 @@ jobs:
             - CameraBase.hpp
 
           constexprs:
-            MainCameraInfo:
-              type: CameraTypes::CameraInfo
+            MainCameraCalibration:
+              type: CameraTypes::CameraCalibration
               value:
-                expr: "CameraTypes::CameraInfo{1440, 1080, 4320, CameraTypes::Encoding::BGR8, {2328.6857198980888, 0.0, 733.35646250924742, 0.0, 2328.6701077899961, 540.61872869227727, 0.0, 0.0, 1.0}, CameraTypes::DistortionModel::PLUMB_BOB, {-0.091821039187099038, 0.46399073468302049, 0.0026098786426372819, 0.0009819586010405485, -0.47512788503104569}, {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0}, {2328.6857198980888, 0.0, 733.35646250924742, 0.0, 0.0, 2328.6701077899961, 540.61872869227727, 0.0, 0.0, 0.0, 1.0, 0.0}}"
+                native_width: 1440
+                native_height: 1080
+                camera_matrix: [2328.6857198980888, 0.0, 733.35646250924742, 0.0, 2328.6701077899961, 540.61872869227727, 0.0, 0.0, 1.0]
+                distortion_model: {expr: CameraTypes::DistortionModel::PLUMB_BOB}
+                distortion_coefficients: [-0.091821039187099038, 0.46399073468302049, 0.0026098786426372819, 0.0009819586010405485, -0.47512788503104569]
+                rectification_matrix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+                projection_matrix: [2328.6857198980888, 0.0, 733.35646250924742, 0.0, 0.0, 2328.6701077899961, 540.61872869227727, 0.0, 0.0, 0.0, 1.0, 0.0]
+            MainFrameLayout:
+              type: CameraTypes::FrameLayout
+              value:
+                width: 720
+                height: 540
+                step: 2160
+                encoding: {expr: CameraTypes::Encoding::BGR8}
+            MainFrameGeometry:
+              type: CameraTypes::FrameGeometry
+              value:
+                epoch: 1
+                width: 720
+                height: 540
+                step: 2160
+                roi_offset_x_native: 0
+                roi_offset_y_native: 0
+                decimation_x: 2
+                decimation_y: 2
+                flags: {expr: CameraTypes::FRAME_GEOMETRY_NONE}
+                reserved: 0
+                sample_phase_x_native: {expr: 0.0F}
+                sample_phase_y_native: {expr: 0.0F}
 
           modules:
             - id: CaptureFileCamera_0
               name: CaptureFileCamera
               template_args:
-                Info: {constexpr: MainCameraInfo}
+                Layout: {constexpr: MainFrameLayout}
               constructor_args:
+                calibration: {constexpr: MainCameraCalibration}
                 runtime:
-                  expr: "CaptureFileCamera<ProjectConstexpr::MainCameraInfo>::RuntimeParam{.file_path = \"/tmp/capture.avi\", .imu_csv_path = \"/tmp/capture_imu.csv\", .camera_name = \"capturefile_camera\", .image_topic_name = \"capturefile_image\", .imu_topic_name = \"capturefile_imu\", .realtime = false, .loop = false, .max_frames = 1}"
+                  file_path: "/tmp/capture.avi"
+                  frame_csv_path: ""
+                  imu_csv_path: "/tmp/capture_imu.csv"
+                  camera_name: capturefile_camera
+                  image_topic_name: capturefile_image
+                  imu_topic_name: capturefile_imu
+                  realtime: false
+                  loop: false
+                  max_frames: 1
+                  geometry: {constexpr: MainFrameGeometry}
           EOF
           cat User/xrobot.yaml
 
