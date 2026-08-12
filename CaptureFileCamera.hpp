@@ -64,11 +64,11 @@ depends:
 #include <unordered_map>
 #include <vector>
 
+#include "AutoAimReplayBenchmark.hpp"
 #include "CameraBase.hpp"
 #include "CaptureFileCameraFrameBin.hpp"
 #include "CaptureFileCameraInput.hpp"
 #include "CaptureFileCameraVideo.hpp"
-#include "ReplayBenchmark.hpp"
 #include "app_framework.hpp"
 #include "libxr.hpp"
 #include "libxr_string.hpp"
