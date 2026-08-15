@@ -22,8 +22,8 @@ constructor_args:
       realtime: true
       loop: false
       max_frames: 0
+      trigger_period_us: 10000
       geometry:
-        epoch: 1
         width: 720
         height: 540
         step: 2160
@@ -48,7 +48,6 @@ depends:
 // clang-format on
 
 #include <Eigen/Dense>
-#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
@@ -57,6 +56,7 @@ depends:
 #include <cstring>
 #include <fstream>
 #include <opencv2/core.hpp>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -93,6 +93,9 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
   using ImageFrame = typename Base::ImageFrame;  ///< CameraBase 图像帧类型。
   using CameraCalibration = typename Base::CameraCalibration;  ///< 原生相机标定。
   using FrameGeometry = typename Base::FrameGeometry;          ///< 固定回放采样几何。
+  using ProfileId = typename Base::ProfileId;                  ///< 固定档位标识。
+  using CameraProfile = typename Base::CameraProfile;          ///< 固定档位描述。
+  using AppliedProfile = typename Base::AppliedProfile;        ///< 已应用档位快照。
   using ImuVector = Eigen::Matrix<float, 3, 1>;  ///< 原始 gyro/accl topic 的三轴数据。
   using ImuSample = CaptureFileCameraDetail::ImuSample;      ///< CSV 中的一帧 IMU 数据。
   using FrameRecord = CaptureFileCameraDetail::FrameRecord;  ///< 帧索引 CSV 中的一行。
@@ -125,11 +128,6 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
    */
   static constexpr int frame_height = static_cast<int>(frame_layout.height);
 
-  /**
-   * @brief 等待 CameraFrameSync 接入图像 sink 时的日志周期。
-   */
-  static constexpr uint32_t image_sink_wait_log_ms = 1000;
-
   static_assert(frame_layout.encoding == CameraTypes::Encoding::BGR8,
                 "CaptureFileCamera currently publishes BGR8 frames");
   static_assert(frame_step ==
@@ -154,9 +152,9 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
     std::string_view imu_topic_name = "camera_imu";  ///< 同步后 IMU 话题名。
     bool realtime = true;                            ///< 是否按录制帧间隔限速播放。
     bool loop = false;                               ///< EOF 后是否回到第 0 帧继续播放。
-    uint32_t max_frames = 0;  ///< 0 表示不限帧数，测试可用环境变量覆盖。
+    uint32_t max_frames = 0;             ///< 0 表示不限帧数，测试可用环境变量覆盖。
+    uint32_t trigger_period_us = 10000;  ///< 单档回放对应的图像触发周期。
     FrameGeometry geometry{
-        .epoch = 1,
         .width = frame_layout.width,
         .height = frame_layout.height,
         .step = frame_layout.step,
@@ -201,6 +199,13 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
       XR_LOG_ERROR("CaptureFileCamera invalid fixed FrameGeometry");
       throw std::runtime_error("CaptureFileCamera: invalid frame geometry");
     }
+    if (runtime_.trigger_period_us == 0U)
+    {
+      throw std::runtime_error("CaptureFileCamera: trigger period must be non-zero");
+    }
+    profiles_[0] = {.id = ProfileId::WIDE,
+                    .geometry = frame_geometry_,
+                    .trigger_period_us = runtime_.trigger_period_us};
     ApplyEnvironmentOverrides();
     LoadImuCsv();
     if (IsFrameBinMode())
@@ -216,6 +221,21 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
     running_.store(true);
     capture_thread_ = std::thread(CaptureThreadMain, this);
     app.Register(*this);
+  }
+
+  [[nodiscard]] std::span<const CameraProfile> Profiles() const noexcept override
+  {
+    return profiles_;
+  }
+
+  LibXR::ErrorCode SwitchProfile(ProfileId id, AppliedProfile& applied) override
+  {
+    if (id != profiles_[0].id)
+    {
+      return LibXR::ErrorCode::NOT_SUPPORT;
+    }
+    applied = {.id = profiles_[0].id, .geometry = profiles_[0].geometry};
+    return LibXR::ErrorCode::OK;
   }
 
   /**
@@ -363,6 +383,17 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
     {
       runtime_.realtime = !(env[0] == '0' && env[1] == '\0');
     }
+    if (const char* env = std::getenv("CAPTURE_FILE_CAMERA_PLAYBACK_RATE_MILLI"))
+    {
+      uint32_t parsed = 0U;
+      if (!CaptureFileCameraDetail::ParsePlaybackRateMilli(env, parsed))
+      {
+        XR_LOG_ERROR("CaptureFileCamera invalid playback rate milli: '%s'", env);
+        throw std::runtime_error("CaptureFileCamera: invalid playback rate milli");
+      }
+      playback_rate_milli_ = parsed;
+    }
+    XR_LOG_INFO("CaptureFileCamera playback rate milli=%u", playback_rate_milli_);
   }
 
   /**
@@ -549,20 +580,10 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
   }
 
   /**
-   * @brief 等 CameraFrameSync 接好图像 sink，避免启动阶段白丢前几帧。
+   * @brief 等待回放产品显式完成整条处理链构造。
    */
-  void WaitForImageSink()
+  void WaitForPipelineReady()
   {
-    uint32_t waited_ms = 0;
-    while (running_.load() && !this->ImageSinkReady())
-    {
-      LibXR::Thread::Sleep(1);
-      ++waited_ms;
-      if (waited_ms % image_sink_wait_log_ms == 0)
-      {
-        XR_LOG_WARN("CaptureFileCamera waiting image sink: %u ms", waited_ms);
-      }
-    }
     if (running_.load() && !AutoAimReplayBenchmark::WaitForPipelineReady())
     {
       XR_LOG_ERROR("CaptureFileCamera timed out waiting for replay pipeline readiness");
@@ -602,15 +623,11 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
   bool WriteAndCommitImage(const cv::Mat& bgr, uint64_t timestamp_us)
   {
     const auto commit_begin = std::chrono::steady_clock::now();
-    if (!this->ImageSinkReady())
-    {
-      return false;
-    }
-
-    ImageFrame* image = this->GetWritableImage();
+    ImageFrame* image = CaptureFileCameraDetail::WaitForReplaySlot(
+        [this]() { return this->GetWritableImage(); },
+        [this]() { return running_.load(); }, []() { LibXR::Thread::Sleep(1); });
     if (image == nullptr)
     {
-      XR_LOG_WARN("CaptureFileCamera writable image is null");
       return false;
     }
 
@@ -693,7 +710,7 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
    */
   void RunFrameBinReplay()
   {
-    WaitForImageSink();
+    WaitForPipelineReady();
     CaptureFileCameraDetail::FrameBinInput frames;
     if (!frames.Open(file_path_))
     {
@@ -742,8 +759,16 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
           wall_start_us = static_cast<uint64_t>(LibXR::Thread::GetTime()) *
                           CaptureFileCameraDetail::microseconds_per_millisecond;
         }
-        const uint64_t target_wall_us =
-            wall_start_us + (replay.imu.timestamp_us - replay_start_us);
+        uint64_t target_wall_us = 0U;
+        if (!CaptureFileCameraDetail::TryReplayDeadlineUs(
+                wall_start_us, replay.imu.timestamp_us - replay_start_us,
+                playback_rate_milli_, target_wall_us))
+        {
+          XR_LOG_ERROR("CaptureFileCamera replay deadline overflow rate_milli=%u",
+                       playback_rate_milli_);
+          running_.store(false);
+          break;
+        }
         SleepReplayPeriodUntil(target_wall_us);
       }
 
@@ -776,7 +801,7 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
 
   void RunLegacyVideoReplay()
   {
-    WaitForImageSink();
+    WaitForPipelineReady();
     CaptureFileCameraDetail::VideoInput video;
     if (!video.Open(file_path_))
     {
@@ -893,8 +918,11 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
   std::string frame_csv_path_{};  ///< 帧索引 CSV 路径。
   std::string imu_csv_path_{};    ///< 显式 IMU CSV 路径副本。
 
-  RuntimeParam runtime_{};          ///< 应用环境变量覆盖后的运行时参数。
-  FrameGeometry frame_geometry_{};  ///< 构造时验证并逐帧复制的固定采样几何。
+  RuntimeParam runtime_{};  ///< 应用环境变量覆盖后的运行时参数。
+  uint32_t playback_rate_milli_ =
+      CaptureFileCameraDetail::default_playback_rate_milli;  ///< wall-clock 倍率。
+  FrameGeometry frame_geometry_{};            ///< 构造时验证并逐帧复制的固定采样几何。
+  std::array<CameraProfile, 1U> profiles_{};  ///< 生命周期内稳定的单档描述。
   CaptureFileCameraDetail::VideoInfo video_info_{};  ///< legacy video 模式下的视频信息。
   std::vector<ImuSample> imu_samples_{};             ///< CSV 中加载的全部 IMU 数据。
   std::vector<FrameRecord> frame_records_{};         ///< 帧索引 CSV 内容。
