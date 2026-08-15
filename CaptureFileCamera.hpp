@@ -128,6 +128,9 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
    */
   static constexpr int frame_height = static_cast<int>(frame_layout.height);
 
+  /** Legacy replay configurations use this period when none is provided. */
+  static constexpr uint32_t default_trigger_period_us = 10000U;
+
   static_assert(frame_layout.encoding == CameraTypes::Encoding::BGR8,
                 "CaptureFileCamera currently publishes BGR8 frames");
   static_assert(frame_step ==
@@ -152,21 +155,59 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
     std::string_view imu_topic_name = "camera_imu";  ///< 同步后 IMU 话题名。
     bool realtime = true;                            ///< 是否按录制帧间隔限速播放。
     bool loop = false;                               ///< EOF 后是否回到第 0 帧继续播放。
-    uint32_t max_frames = 0;             ///< 0 表示不限帧数，测试可用环境变量覆盖。
-    uint32_t trigger_period_us = 10000;  ///< 单档回放对应的图像触发周期。
+    uint32_t max_frames = 0;  ///< 0 表示不限帧数，测试可用环境变量覆盖。
+    uint32_t trigger_period_us =
+        default_trigger_period_us;  ///< 单档回放对应的图像触发周期。
     FrameGeometry geometry{
-        .width = frame_layout.width,
-        .height = frame_layout.height,
-        .step = frame_layout.step,
-        .roi_offset_x_native = 0,
-        .roi_offset_y_native = 0,
-        .decimation_x = 2,
-        .decimation_y = 2,
-        .flags = CameraTypes::FRAME_GEOMETRY_NONE,
-        .reserved = 0,
-        .sample_phase_x_native = 0.0F,
-        .sample_phase_y_native = 0.0F,
+        frame_layout.width,
+        frame_layout.height,
+        frame_layout.step,
+        0U,
+        0U,
+        2U,
+        2U,
+        CameraTypes::FRAME_GEOMETRY_NONE,
+        0U,
+        0.0F,
+        0.0F,
     };  ///< 整次回放固定复制到每帧的原生采样几何。
+
+    RuntimeParam() = default;
+
+    /** Current YAML layout with an explicit trigger period. */
+    constexpr RuntimeParam(std::string_view file_path_in,
+                           std::string_view frame_csv_path_in,
+                           std::string_view imu_csv_path_in,
+                           std::string_view camera_name_in,
+                           std::string_view image_topic_name_in,
+                           std::string_view imu_topic_name_in, bool realtime_in,
+                           bool loop_in, uint32_t max_frames_in,
+                           uint32_t trigger_period_us_in, FrameGeometry geometry_in)
+        : file_path(file_path_in),
+          frame_csv_path(frame_csv_path_in),
+          imu_csv_path(imu_csv_path_in),
+          camera_name(camera_name_in),
+          image_topic_name(image_topic_name_in),
+          imu_topic_name(imu_topic_name_in),
+          realtime(realtime_in),
+          loop(loop_in),
+          max_frames(max_frames_in),
+          trigger_period_us(trigger_period_us_in),
+          geometry(geometry_in)
+    {
+    }
+
+    /** Legacy YAML layout where geometry immediately follows max_frames. */
+    constexpr RuntimeParam(
+        std::string_view file_path_in, std::string_view frame_csv_path_in,
+        std::string_view imu_csv_path_in, std::string_view camera_name_in,
+        std::string_view image_topic_name_in, std::string_view imu_topic_name_in,
+        bool realtime_in, bool loop_in, uint32_t max_frames_in, FrameGeometry geometry_in)
+        : RuntimeParam(file_path_in, frame_csv_path_in, imu_csv_path_in, camera_name_in,
+                       image_topic_name_in, imu_topic_name_in, realtime_in, loop_in,
+                       max_frames_in, default_trigger_period_us, geometry_in)
+    {
+    }
   };
 
   /**
