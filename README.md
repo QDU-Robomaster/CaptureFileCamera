@@ -18,9 +18,12 @@
 - `runtime.geometry` 是本次回放固定使用的 `FrameGeometry`，会按值复制到每个
   `ImageFrame`。
 
-构造时会验证 geometry 的非零 `epoch`、尺寸、步长、下采样、ROI 和原生边界。内录包的
+构造时会验证 geometry 的尺寸、步长、下采样、ROI 和原生边界。内录包的
 像素布局必须与 `Layout` 一致；wide 回放使用原生 `1440x1080` 标定和 `720x540`、2x2
 下采样几何。
+
+文件相机只公布一个固定档位。请求当前 `WIDE` 档直接返回其逐帧 geometry；请求其他档位
+返回 `NOT_SUPPORT`，不会改变回放状态。
 
 ## 运行参数
 
@@ -35,12 +38,19 @@
 - `realtime`：为 `true` 时按录制 timestamp 控制回放速度。
 - `loop`：为 `true` 时播放到文件末尾后重新开始。
 - `max_frames`：最大提交帧数，`0` 表示不限制。
+- `trigger_period_us`：单档对应的图像触发周期，默认 `10000` 微秒。
 - `geometry`：帧坐标到原生传感器坐标的固定映射。
 
 测试环境可以用环境变量覆盖部分参数：
 
 - `CAPTURE_FILE_CAMERA_MAX_FRAMES`：限制本次回放提交的图像帧数。
 - `CAPTURE_FILE_CAMERA_REALTIME=0`：关闭实时限速。
+- `CAPTURE_FILE_CAMERA_PLAYBACK_RATE_MILLI`：只加速 frame-bin 的 wall-clock 回放节拍；
+  支持 `1000..1000000`，`1720` 表示 `1.72x`，不修改图像或 IMU 的传感器时间戳。
+
+文件回放要求输入无损：CameraBase 图像池暂时没有空槽时，采集线程保留当前已解码帧并
+等待后重试。等待期间不会重复发布该帧 IMU，也不会推进输入索引；停止请求可以打断等待。
+这是文件源的背压策略，不代表实时相机能在外部触发持续运行时保留所有物理帧。
 
 ## 帧数据 Bin
 

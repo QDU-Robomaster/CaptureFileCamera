@@ -6,11 +6,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
-#include <sstream>
-#include <string>
-
+#include <limits>
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
+#include <sstream>
+#include <string>
 
 namespace CaptureFileCameraDetail
 {
@@ -18,6 +18,87 @@ namespace CaptureFileCameraDetail
 static constexpr uint64_t default_period_us = 10000;
 static constexpr double microseconds_per_second = 1000000.0;
 static constexpr uint64_t microseconds_per_millisecond = 1000;
+static constexpr uint32_t min_playback_rate_milli = 1000;
+static constexpr uint32_t default_playback_rate_milli = min_playback_rate_milli;
+static constexpr uint32_t max_playback_rate_milli = 1000000;
+
+/**
+ * @brief 等待无损回放源取得一个可写图像槽。
+ *
+ * `try_acquire` 每轮只尝试一次，失败后由 `backoff` 让出执行资源。停止后返回空，
+ * 调用方可在不重发当前帧 IMU、不推进输入索引的前提下结束回放。
+ */
+template <typename TryAcquire, typename KeepWaiting, typename Backoff>
+auto WaitForReplaySlot(TryAcquire&& try_acquire, KeepWaiting&& keep_waiting,
+                       Backoff&& backoff)
+{
+  decltype(try_acquire()) slot = nullptr;
+  while (keep_waiting())
+  {
+    slot = try_acquire();
+    if (slot != nullptr)
+    {
+      break;
+    }
+    backoff();
+  }
+  return slot;
+}
+
+/**
+ * @brief 解析仅用于加速回放的 milli-rate 环境变量。
+ */
+constexpr bool ParsePlaybackRateMilli(const char* text, uint32_t& rate_milli)
+{
+  if (text == nullptr || text[0] == '\0')
+  {
+    return false;
+  }
+  uint32_t parsed = 0U;
+  for (const char* cursor = text; *cursor != '\0'; ++cursor)
+  {
+    if (*cursor < '0' || *cursor > '9')
+    {
+      return false;
+    }
+    parsed = parsed * 10U + static_cast<uint32_t>(*cursor - '0');
+    if (parsed > max_playback_rate_milli)
+    {
+      return false;
+    }
+  }
+  if (parsed < min_playback_rate_milli)
+  {
+    return false;
+  }
+  rate_milli = parsed;
+  return true;
+}
+
+/**
+ * @brief 把录制时间差换成加速后的 wall-clock deadline。
+ *
+ * 输入倍率限制为 `[1000, 1000000]`，所以缩放值不会大于原时间差。失败时不修改
+ * `deadline_us`。
+ */
+constexpr bool TryReplayDeadlineUs(uint64_t wall_start_us, uint64_t elapsed_us,
+                                   uint32_t rate_milli, uint64_t& deadline_us)
+{
+  if (rate_milli < min_playback_rate_milli || rate_milli > max_playback_rate_milli)
+  {
+    return false;
+  }
+  const uint64_t whole = elapsed_us / rate_milli;
+  const uint64_t remainder = elapsed_us % rate_milli;
+  const uint64_t scaled_us = whole * default_playback_rate_milli +
+                             remainder * default_playback_rate_milli / rate_milli;
+  if (scaled_us > std::numeric_limits<uint64_t>::max() - wall_start_us)
+  {
+    return false;
+  }
+  deadline_us = wall_start_us + scaled_us;
+  return true;
+}
 
 /**
  * @brief CSV 中的一帧传感器记录。
@@ -27,33 +108,33 @@ static constexpr uint64_t microseconds_per_millisecond = 1000;
  */
 struct ImuSample
 {
-  uint64_t timestamp_us{};  ///< 传感器侧时间戳，单位微秒。
+  uint64_t timestamp_us{};           ///< 传感器侧时间戳，单位微秒。
   std::array<float, 4> quat_wxyz{};  ///< 姿态四元数，顺序为 wxyz。
-  std::array<float, 3> gyro_xyz{};  ///< 角速度，单位 rad/s。
-  std::array<float, 3> accl_xyz{};  ///< 线加速度，单位 m/s^2。
+  std::array<float, 3> gyro_xyz{};   ///< 角速度，单位 rad/s。
+  std::array<float, 3> accl_xyz{};   ///< 线加速度，单位 m/s^2。
 };
 
 /// 帧数据 bin 的索引记录。
 struct FrameRecord
 {
-  uint64_t frame_index{};  ///< 录制时的连续帧号。
+  uint64_t frame_index{};   ///< 录制时的连续帧号。
   uint64_t timestamp_us{};  ///< 图像传感器侧时间戳，单位微秒。
   uint64_t offset_bytes{};  ///< 当前图像在 frames.bin 中的起始偏移。
-  uint64_t size_bytes{};  ///< 当前图像的字节数。
-  std::string codec{};  ///< 可选图像编码；为空时由大小自动判断。
+  uint64_t size_bytes{};    ///< 当前图像的字节数。
+  std::string codec{};      ///< 可选图像编码；为空时由大小自动判断。
 };
 
 /// 帧数据 bin 回放时的一条已对齐记录。
 struct FrameBinReplayFrame
 {
   FrameRecord frame{};  ///< 图像位置。
-  ImuSample imu{};  ///< 与该图像 timestamp 对齐的 IMU。
+  ImuSample imu{};      ///< 与该图像 timestamp 对齐的 IMU。
 };
 
 /// 视频几何信息和回放限速兜底周期。
 struct VideoInfo
 {
-  int width{};  ///< 视频宽度，单位像素。
+  int width{};   ///< 视频宽度，单位像素。
   int height{};  ///< 视频高度，单位像素。
   double fps{};  ///< OpenCV 读取到的帧率，可能为 0 或无效值。
   uint64_t fallback_period_us{default_period_us};  ///< 无法从 CSV 推导周期时使用。
@@ -121,13 +202,11 @@ inline bool ParseImuCsvRow(const std::string& line, ImuSample& sample)
 
 inline std::string TrimAscii(std::string value)
 {
-  while (!value.empty() &&
-         std::isspace(static_cast<unsigned char>(value.front())) != 0)
+  while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front())) != 0)
   {
     value.erase(value.begin());
   }
-  while (!value.empty() &&
-         std::isspace(static_cast<unsigned char>(value.back())) != 0)
+  while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back())) != 0)
   {
     value.pop_back();
   }
@@ -200,8 +279,7 @@ inline bool ParseFrameCsvRow(const std::string& line, FrameRecord& frame)
     }
   }
 
-  if (values[0] < 0.0 || values[1] < 0.0 ||
-      values[2] < 0.0 || values[3] < 0.0)
+  if (values[0] < 0.0 || values[1] < 0.0 || values[2] < 0.0 || values[3] < 0.0)
   {
     return false;
   }

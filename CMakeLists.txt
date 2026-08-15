@@ -11,3 +11,9 @@ find_package(OpenCV 4 REQUIRED COMPONENTS core imgproc imgcodecs videoio)
 target_link_libraries(${_DEPS_TARGET} INTERFACE ${OpenCV_LIBS})
 
 set_property(GLOBAL APPEND PROPERTY XR_MODULE_DEPS ${_DEPS_TARGET})
+
+if(BUILD_TESTING)
+  include(CTest)
+  add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/tests
+                   ${CMAKE_CURRENT_BINARY_DIR}/CaptureFileCamera_tests)
+endif()
