@@ -118,7 +118,6 @@ jobs:
             MainFrameGeometry:
               type: CameraTypes::FrameGeometry
               value:
-                epoch: 1
                 width: 720
                 height: 540
                 step: 2160
@@ -158,8 +157,10 @@ jobs:
       - name: Build
         run: |
           cmake -S . -B build \
+            -DBUILD_TESTING=ON \
             -DOpenCV_DIR=/usr/lib/x86_64-linux-gnu/cmake/opencv4 \
             -DLIBXR_PRINT_INTEGER_ENABLE_64BIT=ON \
             -DLIBXR_PRINT_FLOAT_ENABLE_DOUBLE=ON \
             -DLIBXR_PRINT_ENABLE_POINTER=ON
           cmake --build build -j2
+          ctest --test-dir build/libxr --output-on-failure --no-tests=error
