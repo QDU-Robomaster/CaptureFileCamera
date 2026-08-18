@@ -44,6 +44,7 @@ template_args:
 required_hardware: []
 depends:
   - qdu-future/CameraBase
+  - xrobot-org/DurationStatistics
 === END MANIFEST === */
 // clang-format on
 
@@ -69,6 +70,7 @@ depends:
 #include "CaptureFileCameraFrameBin.hpp"
 #include "CaptureFileCameraInput.hpp"
 #include "CaptureFileCameraVideo.hpp"
+#include "DurationStatistics.hpp"
 #include "app_framework.hpp"
 #include "libxr.hpp"
 #include "libxr_string.hpp"
@@ -255,22 +257,50 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
    */
   void OnMonitor() override
   {
-    const uint64_t read_us = video_read_time_us_accum_.exchange(0);
-    const uint64_t bgr_us = bgr_convert_time_us_accum_.exchange(0);
-    const uint64_t imu_us = imu_publish_time_us_accum_.exchange(0);
-    const uint64_t commit_us = image_commit_time_us_accum_.exchange(0);
-    const uint64_t sleep_us = replay_sleep_time_us_accum_.exchange(0);
+    const auto video_read = video_read_duration_.GetSummary();
+    const auto bgr_convert = bgr_convert_duration_.GetSummary();
+    const auto imu_publish = imu_publish_duration_.GetSummary();
+    const auto image_commit = image_commit_duration_.GetSummary();
+    const auto replay_sleep = replay_sleep_duration_.GetSummary();
     const uint32_t period_frames = period_frames_committed_.exchange(0);
-    const double denom = period_frames == 0U ? 1.0 : static_cast<double>(period_frames);
+    XR_LOG_INFO("CaptureFileCamera monitor: frames=%u imu=%u running=%d period_frames=%u",
+                frames_committed_.load(), imu_published_.load(), running_.load() ? 1 : 0,
+                period_frames);
     XR_LOG_INFO(
-        "CaptureFileCamera monitor: frames=%u imu=%u running=%d period_frames=%u "
-        "read_ms=%.3f bgr_ms=%.3f imu_ms=%.3f commit_ms=%.3f sleep_ms=%.3f",
-        frames_committed_.load(), imu_published_.load(), running_.load() ? 1 : 0,
-        period_frames, static_cast<double>(read_us) / 1000.0 / denom,
-        static_cast<double>(bgr_us) / 1000.0 / denom,
-        static_cast<double>(imu_us) / 1000.0 / denom,
-        static_cast<double>(commit_us) / 1000.0 / denom,
-        static_cast<double>(sleep_us) / 1000.0 / denom);
+        "CaptureFileCamera video_read count=%llu average_us=%llu minimum_us=%llu "
+        "maximum_us=%llu",
+        static_cast<unsigned long long>(video_read.sample_count),
+        static_cast<unsigned long long>(video_read.average_us),
+        static_cast<unsigned long long>(video_read.minimum_us),
+        static_cast<unsigned long long>(video_read.maximum_us));
+    XR_LOG_INFO(
+        "CaptureFileCamera bgr_convert count=%llu average_us=%llu minimum_us=%llu "
+        "maximum_us=%llu",
+        static_cast<unsigned long long>(bgr_convert.sample_count),
+        static_cast<unsigned long long>(bgr_convert.average_us),
+        static_cast<unsigned long long>(bgr_convert.minimum_us),
+        static_cast<unsigned long long>(bgr_convert.maximum_us));
+    XR_LOG_INFO(
+        "CaptureFileCamera imu_publish count=%llu average_us=%llu minimum_us=%llu "
+        "maximum_us=%llu",
+        static_cast<unsigned long long>(imu_publish.sample_count),
+        static_cast<unsigned long long>(imu_publish.average_us),
+        static_cast<unsigned long long>(imu_publish.minimum_us),
+        static_cast<unsigned long long>(imu_publish.maximum_us));
+    XR_LOG_INFO(
+        "CaptureFileCamera image_commit count=%llu average_us=%llu minimum_us=%llu "
+        "maximum_us=%llu",
+        static_cast<unsigned long long>(image_commit.sample_count),
+        static_cast<unsigned long long>(image_commit.average_us),
+        static_cast<unsigned long long>(image_commit.minimum_us),
+        static_cast<unsigned long long>(image_commit.maximum_us));
+    XR_LOG_INFO(
+        "CaptureFileCamera replay_sleep count=%llu average_us=%llu minimum_us=%llu "
+        "maximum_us=%llu",
+        static_cast<unsigned long long>(replay_sleep.sample_count),
+        static_cast<unsigned long long>(replay_sleep.average_us),
+        static_cast<unsigned long long>(replay_sleep.minimum_us),
+        static_cast<unsigned long long>(replay_sleep.maximum_us));
   }
 
   /**
@@ -347,12 +377,8 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
     {
       return;
     }
-    const auto sleep_begin = std::chrono::steady_clock::now();
+    auto replay_sleep_measurement = replay_sleep_duration_.Measure();
     LibXR::Thread::Sleep(static_cast<uint32_t>(sleep_ms));
-    const auto sleep_end = std::chrono::steady_clock::now();
-    replay_sleep_time_us_accum_.fetch_add(static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::microseconds>(sleep_end - sleep_begin)
-            .count()));
   }
 
   /**
@@ -598,7 +624,7 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
    */
   void PublishRawImu(const ImuSample& sample)
   {
-    const auto publish_begin = std::chrono::steady_clock::now();
+    auto imu_publish_measurement = imu_publish_duration_.Measure();
     ImuVector gyro_msg;
     ImuVector accl_msg;
     gyro_msg << sample.gyro_xyz[0], sample.gyro_xyz[1], sample.gyro_xyz[2];
@@ -611,10 +637,6 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
     raw_accl_topic_.Publish(accl_msg, timestamp);
     raw_quat_topic_.Publish(quat_msg, timestamp);
     imu_published_.fetch_add(1);
-    const auto publish_end = std::chrono::steady_clock::now();
-    imu_publish_time_us_accum_.fetch_add(static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::microseconds>(publish_end - publish_begin)
-            .count()));
   }
 
   /**
@@ -622,6 +644,7 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
    */
   bool WriteAndCommitImage(const cv::Mat& bgr, uint64_t timestamp_us)
   {
+    auto image_commit_measurement = image_commit_duration_.Measure();
     const auto commit_begin = std::chrono::steady_clock::now();
     ImageFrame* image = CaptureFileCameraDetail::WaitForReplaySlot(
         [this]() { return this->GetWritableImage(); },
@@ -658,9 +681,6 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
     AutoAimReplayBenchmark::RecordCaptureCommit(
         timestamp_us,
         std::chrono::duration<double, std::milli>(commit_end - commit_begin).count());
-    image_commit_time_us_accum_.fetch_add(static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::microseconds>(commit_end - commit_begin)
-            .count()));
     return true;
   }
 
@@ -672,7 +692,12 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
   {
     const auto read_begin = std::chrono::steady_clock::now();
     std::vector<uint8_t> frame_bytes;
-    if (!frames.Read(replay.frame, frame_bytes))
+    bool read_ok = false;
+    {
+      auto video_read_measurement = video_read_duration_.Measure();
+      read_ok = frames.Read(replay.frame, frame_bytes);
+    }
+    if (!read_ok)
     {
       XR_LOG_ERROR("CaptureFileCamera frame bytes read failed index=%u",
                    static_cast<unsigned>(replay.frame.frame_index));
@@ -680,9 +705,14 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
     }
     const auto read_finish = std::chrono::steady_clock::now();
 
-    if (!CaptureFileCameraDetail::DecodeFrameBytes(replay.frame, frame_bytes,
-                                                   Base::image_bytes, frame_width,
-                                                   frame_height, frame_step, bgr))
+    bool decode_ok = false;
+    {
+      auto bgr_convert_measurement = bgr_convert_duration_.Measure();
+      decode_ok = CaptureFileCameraDetail::DecodeFrameBytes(
+          replay.frame, frame_bytes, Base::image_bytes, frame_width, frame_height,
+          frame_step, bgr);
+    }
+    if (!decode_ok)
     {
       XR_LOG_ERROR("CaptureFileCamera frame decode failed index=%u codec=%s size=%u",
                    static_cast<unsigned>(replay.frame.frame_index),
@@ -833,40 +863,37 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
         continue;
       }
 
-      const auto read_begin = std::chrono::steady_clock::now();
       cv::Mat decoded;
-      if (!video.Read(decoded))
       {
-        XR_LOG_PASS(
-            "CaptureFileCamera video reader reached EOF after %u committed frames",
-            frames_committed_.load());
-        if (!runtime_.loop)
+        auto video_read_measurement = video_read_duration_.Measure();
+        if (!video.Read(decoded))
         {
+          XR_LOG_PASS(
+              "CaptureFileCamera video reader reached EOF after %u committed frames",
+              frames_committed_.load());
+          if (!runtime_.loop)
+          {
+            running_.store(false);
+            break;
+          }
+          video.Rewind();
+          continue;
+        }
+      }
+
+      cv::Mat bgr;
+      {
+        auto bgr_convert_measurement = bgr_convert_duration_.Measure();
+        if (!CaptureFileCameraDetail::ConvertToBgr(decoded, bgr) ||
+            !FrameShapeMatches(bgr))
+        {
+          XR_LOG_ERROR(
+              "CaptureFileCamera legacy video frame shape/type mismatch index=%u",
+              static_cast<unsigned>(frame_index));
           running_.store(false);
           break;
         }
-        video.Rewind();
-        continue;
       }
-      const auto read_end = std::chrono::steady_clock::now();
-      video_read_time_us_accum_.fetch_add(static_cast<uint64_t>(
-          std::chrono::duration_cast<std::chrono::microseconds>(read_end - read_begin)
-              .count()));
-
-      const auto convert_begin = std::chrono::steady_clock::now();
-      cv::Mat bgr;
-      if (!CaptureFileCameraDetail::ConvertToBgr(decoded, bgr) || !FrameShapeMatches(bgr))
-      {
-        XR_LOG_ERROR("CaptureFileCamera legacy video frame shape/type mismatch index=%u",
-                     static_cast<unsigned>(frame_index));
-        running_.store(false);
-        break;
-      }
-      const auto convert_end = std::chrono::steady_clock::now();
-      bgr_convert_time_us_accum_.fetch_add(
-          static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
-                                    convert_end - convert_begin)
-                                    .count()));
 
       const auto& imu = imu_samples_[frame_index];
       PublishRawImu(imu);
@@ -944,10 +971,10 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
   std::atomic<uint32_t> frames_committed_{0};         ///< 已提交图像帧数。
   std::atomic<uint32_t> period_frames_committed_{0};  ///< 本监控周期已提交图像帧数。
 
-  std::atomic<uint32_t> imu_published_{0};               ///< 已发布原始 IMU 组数。
-  std::atomic<uint64_t> video_read_time_us_accum_{0};    ///< 本监控周期视频读取耗时。
-  std::atomic<uint64_t> bgr_convert_time_us_accum_{0};   ///< 本监控周期 BGR 转换耗时。
-  std::atomic<uint64_t> imu_publish_time_us_accum_{0};   ///< 本监控周期 IMU 发布耗时。
-  std::atomic<uint64_t> image_commit_time_us_accum_{0};  ///< 本监控周期图像写入提交耗时。
-  std::atomic<uint64_t> replay_sleep_time_us_accum_{0};  ///< 本监控周期限速睡眠耗时。
+  std::atomic<uint32_t> imu_published_{0};  ///< 已发布原始 IMU 组数。
+  XRobot::DurationStatistics video_read_duration_{};
+  XRobot::DurationStatistics bgr_convert_duration_{};
+  XRobot::DurationStatistics imu_publish_duration_{};
+  XRobot::DurationStatistics image_commit_duration_{};
+  XRobot::DurationStatistics replay_sleep_duration_{};
 };
