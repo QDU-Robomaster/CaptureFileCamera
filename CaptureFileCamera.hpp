@@ -65,7 +65,6 @@ depends:
 #include <unordered_map>
 #include <vector>
 
-#include "AutoAimReplayBenchmark.hpp"
 #include "CameraBase.hpp"
 #include "CaptureFileCameraFrameBin.hpp"
 #include "CaptureFileCameraInput.hpp"
@@ -606,18 +605,6 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
   }
 
   /**
-   * @brief 等待回放产品显式完成整条处理链构造。
-   */
-  void WaitForPipelineReady()
-  {
-    if (running_.load() && !AutoAimReplayBenchmark::WaitForPipelineReady())
-    {
-      XR_LOG_ERROR("CaptureFileCamera timed out waiting for replay pipeline readiness");
-      running_.store(false);
-    }
-  }
-
-  /**
    * @brief 发布一组原始 gyro/accl/quat topic。
    *
    * 采样时间戳写入 Topic 元信息，消息内容只保留测量值。
@@ -645,7 +632,6 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
   bool WriteAndCommitImage(const cv::Mat& bgr, uint64_t timestamp_us)
   {
     auto image_commit_measurement = image_commit_duration_.Measure();
-    const auto commit_begin = std::chrono::steady_clock::now();
     ImageFrame* image = CaptureFileCameraDetail::WaitForReplaySlot(
         [this]() { return this->GetWritableImage(); },
         [this]() { return running_.load(); }, []() { LibXR::Thread::Sleep(1); });
@@ -677,10 +663,6 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
 
     frames_committed_.fetch_add(1);
     period_frames_committed_.fetch_add(1);
-    const auto commit_end = std::chrono::steady_clock::now();
-    AutoAimReplayBenchmark::RecordCaptureCommit(
-        timestamp_us,
-        std::chrono::duration<double, std::milli>(commit_end - commit_begin).count());
     return true;
   }
 
@@ -690,7 +672,6 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
   bool ReadFrameBinFrame(CaptureFileCameraDetail::FrameBinInput& frames,
                          const FrameBinReplayFrame& replay, cv::Mat& bgr)
   {
-    const auto read_begin = std::chrono::steady_clock::now();
     std::vector<uint8_t> frame_bytes;
     bool read_ok = false;
     {
@@ -703,8 +684,6 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
                    static_cast<unsigned>(replay.frame.frame_index));
       return false;
     }
-    const auto read_finish = std::chrono::steady_clock::now();
-
     bool decode_ok = false;
     {
       auto bgr_convert_measurement = bgr_convert_duration_.Measure();
@@ -719,17 +698,12 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
                    replay.frame.codec.c_str(), static_cast<unsigned>(frame_bytes.size()));
       return false;
     }
-    const auto decode_finish = std::chrono::steady_clock::now();
     if (!FrameShapeMatches(bgr))
     {
       XR_LOG_ERROR("CaptureFileCamera encoded frame shape mismatch index=%u",
                    static_cast<unsigned>(replay.frame.frame_index));
       return false;
     }
-    AutoAimReplayBenchmark::RecordCaptureDecode(
-        replay.frame.timestamp_us,
-        std::chrono::duration<double, std::milli>(read_finish - read_begin).count(),
-        std::chrono::duration<double, std::milli>(decode_finish - read_finish).count());
     return true;
   }
 
@@ -740,19 +714,16 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
    */
   void RunFrameBinReplay()
   {
-    WaitForPipelineReady();
     CaptureFileCameraDetail::FrameBinInput frames;
     if (!frames.Open(file_path_))
     {
       XR_LOG_ERROR("CaptureFileCamera failed to open frames bin '%s' in worker",
                    file_path_.c_str());
       running_.store(false);
-      AutoAimReplayBenchmark::MarkSourceComplete(frames_committed_.load(), false);
       return;
     }
 
     std::size_t frame_index = 0;
-    bool replay_ok = false;
     uint64_t wall_start_us = 0;
     const uint64_t replay_start_us =
         frame_bin_replay_frames_.empty()
@@ -766,7 +737,6 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
                     frames_committed_.load());
         if (!runtime_.loop)
         {
-          replay_ok = true;
           running_.store(false);
           break;
         }
@@ -802,36 +772,24 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
         SleepReplayPeriodUntil(target_wall_us);
       }
 
-      AutoAimReplayBenchmark::RecordCaptureStart(replay.frame.timestamp_us);
       PublishRawImu(replay.imu);
       if (!WriteAndCommitImage(bgr, replay.frame.timestamp_us))
       {
         running_.store(false);
         break;
       }
-      if (!AutoAimReplayBenchmark::WaitForAimer(replay.frame.timestamp_us))
-      {
-        XR_LOG_ERROR("CaptureFileCamera timed out waiting for aimer timestamp=%llu",
-                     static_cast<unsigned long long>(replay.frame.timestamp_us));
-        running_.store(false);
-        break;
-      }
-
       ++frame_index;
       if (runtime_.max_frames != 0U && frames_committed_.load() >= runtime_.max_frames)
       {
         XR_LOG_PASS("CaptureFileCamera reached max_frames=%u", runtime_.max_frames);
-        replay_ok = true;
         running_.store(false);
         break;
       }
     }
-    AutoAimReplayBenchmark::MarkSourceComplete(frames_committed_.load(), replay_ok);
   }
 
   void RunLegacyVideoReplay()
   {
-    WaitForPipelineReady();
     CaptureFileCameraDetail::VideoInput video;
     if (!video.Open(file_path_))
     {
