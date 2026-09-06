@@ -166,6 +166,20 @@ jobs:
                 reserved: 0
                 sample_phase_x_native: {expr: 0.0F}
                 sample_phase_y_native: {expr: 0.0F}
+            MainRuntime:
+              type: CaptureFileCamera<ProjectConstexpr::MainFrameLayout>::RuntimeParam
+              value:
+                file_path: "/tmp/capture.avi"
+                frame_csv_path: ""
+                imu_csv_path: "/tmp/capture_imu.csv"
+                camera_name: capturefile_camera
+                image_topic_name: capturefile_image
+                imu_topic_name: capturefile_imu
+                realtime: false
+                loop: false
+                max_frames: 1
+                trigger_period_us: 10000
+                geometry: {constexpr: MainFrameGeometry}
 
           modules:
             - id: CaptureFileCamera_0
@@ -174,17 +188,7 @@ jobs:
                 Layout: {constexpr: MainFrameLayout}
               constructor_args:
                 calibration: {constexpr: MainCameraCalibration}
-                runtime:
-                  file_path: "/tmp/capture.avi"
-                  frame_csv_path: ""
-                  imu_csv_path: "/tmp/capture_imu.csv"
-                  camera_name: capturefile_camera
-                  image_topic_name: capturefile_image
-                  imu_topic_name: capturefile_imu
-                  realtime: false
-                  loop: false
-                  max_frames: 1
-                  geometry: {constexpr: MainFrameGeometry}
+                runtime: {constexpr: MainRuntime}
           EOF
           cat User/xrobot.yaml
 
