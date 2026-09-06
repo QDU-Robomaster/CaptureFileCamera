@@ -21,13 +21,63 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: Modules/${{ env.XR_MODULE_NAME }}
+          ref: ${{ github.head_ref || github.ref_name }}
 
-      - name: Checkout CameraBase
-        uses: actions/checkout@v4
-        with:
-          repository: QDU-Robomaster/CameraBase
-          ref: master
-          path: Modules/CameraBase
+      - name: Pull libxr
+        run: git clone --depth=1 https://github.com/Jiu-xiao/libxr ./libxr
+
+      - name: Install OpenCV
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends libopencv-dev
+
+      - name: Install xrobot
+        run: |
+          python3 -m pip install --upgrade pip
+          pip3 install pyyaml requests xrobot libxr
+
+      - name: Prepare module sources
+        run: |
+          xrobot_setup || true
+          xrobot_src_man add-source https://qdu-robomaster.github.io/qdu-future-modules/index.yaml
+          xrobot_add_mod qdu-future/${{ env.XR_MODULE_NAME }}
+          cat Modules/sources.yaml
+          cat Modules/modules.yaml
+
+      - name: Add current manifest dependencies to module config
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          import yaml
+          from xrobot.ModuleParser import load_single_module
+
+          module_path = Path("Modules") / os.environ["XR_MODULE_NAME"]
+          manifest = load_single_module(module_path)
+          if manifest is None:
+              raise SystemExit(f"manifest not found: {module_path}")
+
+          config_path = Path("Modules/modules.yaml")
+          config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+          modules = config.setdefault("modules", [])
+          current_module = f"qdu-future/{os.environ['XR_MODULE_NAME']}"
+          modules[:] = [
+              module for module in modules
+              if str(module).split("@", 1)[0] != current_module
+          ]
+          for dependency in manifest.depends:
+              if dependency not in modules:
+                  modules.append(dependency)
+          config_path.write_text(
+              yaml.safe_dump(config, sort_keys=False, allow_unicode=True),
+              encoding="utf-8",
+          )
+          print("direct manifest dependencies:", manifest.depends)
+          PY
+
+      - name: Sync module repos from MANIFEST dependencies
+        run: xrobot_init_mod
 
       - name: Align coordinated dependency branches
         shell: bash
@@ -44,19 +94,6 @@ jobs:
               git -C "${module_dir}" submodule update --init --recursive --depth=1
             fi
           done
-
-      - name: Pull libxr
-        run: git clone --depth=1 https://github.com/Jiu-xiao/libxr ./libxr
-
-      - name: Install OpenCV
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends libopencv-dev
-
-      - name: Install xrobot
-        run: |
-          python3 -m pip install --upgrade pip
-          pip3 install pyyaml requests xrobot libxr
 
       - name: Create build harness
         run: |
@@ -118,7 +155,6 @@ jobs:
             MainFrameGeometry:
               type: CameraTypes::FrameGeometry
               value:
-                epoch: 1
                 width: 720
                 height: 540
                 step: 2160
