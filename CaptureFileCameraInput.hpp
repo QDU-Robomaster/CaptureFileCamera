@@ -18,9 +18,6 @@ namespace CaptureFileCameraDetail
 static constexpr uint64_t default_period_us = 10000;
 static constexpr double microseconds_per_second = 1000000.0;
 static constexpr uint64_t microseconds_per_millisecond = 1000;
-static constexpr uint32_t min_playback_rate_milli = 1000;
-static constexpr uint32_t default_playback_rate_milli = min_playback_rate_milli;
-static constexpr uint32_t max_playback_rate_milli = 1000000;
 
 /**
  * @brief 等待无损回放源取得一个可写图像槽。
@@ -45,53 +42,35 @@ auto WaitForReplaySlot(TryAcquire&& try_acquire, KeepWaiting&& keep_waiting,
   return slot;
 }
 
-/**
- * @brief 解析仅用于加速回放的 milli-rate 环境变量。
- */
-constexpr bool ParsePlaybackRateMilli(const char* text, uint32_t& rate_milli)
+/** @brief 回放倍率必须是有限正数。 */
+inline bool ValidReplaySpeed(double replay_speed)
 {
-  if (text == nullptr || text[0] == '\0')
-  {
-    return false;
-  }
-  uint32_t parsed = 0U;
-  for (const char* cursor = text; *cursor != '\0'; ++cursor)
-  {
-    if (*cursor < '0' || *cursor > '9')
-    {
-      return false;
-    }
-    parsed = parsed * 10U + static_cast<uint32_t>(*cursor - '0');
-    if (parsed > max_playback_rate_milli)
-    {
-      return false;
-    }
-  }
-  if (parsed < min_playback_rate_milli)
-  {
-    return false;
-  }
-  rate_milli = parsed;
-  return true;
+  return std::isfinite(replay_speed) && replay_speed > 0.0;
 }
 
 /**
- * @brief 把录制时间差换成加速后的 wall-clock deadline。
+ * @brief 按回放倍率把录制时间差换成 wall-clock deadline。
  *
- * 输入倍率限制为 `[1000, 1000000]`，所以缩放值不会大于原时间差。失败时不修改
- * `deadline_us`。
+ * 向上取整到微秒；原速使用整数运算。倍率无效或时间溢出时不修改 `deadline_us`。
  */
-constexpr bool TryReplayDeadlineUs(uint64_t wall_start_us, uint64_t elapsed_us,
-                                   uint32_t rate_milli, uint64_t& deadline_us)
+inline bool TryReplayDeadlineUs(uint64_t wall_start_us, uint64_t elapsed_us,
+                                double replay_speed, uint64_t& deadline_us)
 {
-  if (rate_milli < min_playback_rate_milli || rate_milli > max_playback_rate_milli)
+  if (!ValidReplaySpeed(replay_speed))
   {
     return false;
   }
-  const uint64_t whole = elapsed_us / rate_milli;
-  const uint64_t remainder = elapsed_us % rate_milli;
-  const uint64_t scaled_us = whole * default_playback_rate_milli +
-                             remainder * default_playback_rate_milli / rate_milli;
+  uint64_t scaled_us = elapsed_us;
+  if (replay_speed != 1.0)
+  {
+    const long double scaled =
+        std::ceil(static_cast<long double>(elapsed_us) / replay_speed);
+    if (!std::isfinite(scaled) || scaled >= std::ldexp(1.0L, 64))
+    {
+      return false;
+    }
+    scaled_us = static_cast<uint64_t>(scaled);
+  }
   if (scaled_us > std::numeric_limits<uint64_t>::max() - wall_start_us)
   {
     return false;

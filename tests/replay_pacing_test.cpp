@@ -17,23 +17,12 @@ void Expect(bool condition, std::string_view message)
   }
 }
 
-void ExpectParse(const char* text, bool expected, uint32_t expected_rate = 0U)
-{
-  uint32_t rate = 0U;
-  const bool parsed = CaptureFileCameraDetail::ParsePlaybackRateMilli(text, rate);
-  Expect(parsed == expected, "playback-rate parse result mismatch");
-  if (expected)
-  {
-    Expect(rate == expected_rate, "playback-rate parsed value mismatch");
-  }
-}
-
-void ExpectDeadline(uint64_t wall_start_us, uint64_t elapsed_us, uint32_t rate_milli,
+void ExpectDeadline(uint64_t wall_start_us, uint64_t elapsed_us, double replay_speed,
                     bool expected, uint64_t expected_deadline_us = 0U)
 {
   uint64_t deadline_us = 17U;
   const bool valid = CaptureFileCameraDetail::TryReplayDeadlineUs(
-      wall_start_us, elapsed_us, rate_milli, deadline_us);
+      wall_start_us, elapsed_us, replay_speed, deadline_us);
   Expect(valid == expected, "replay deadline validity mismatch");
   if (expected)
   {
@@ -90,28 +79,25 @@ void TestReplaySlotWaitStops()
 
 int main()
 {
-  ExpectParse("1000", true, 1000U);
-  ExpectParse("1720", true, 1720U);
-  ExpectParse("1000000", true, 1000000U);
-  ExpectParse(nullptr, false);
-  ExpectParse("", false);
-  ExpectParse("0", false);
-  ExpectParse("999", false);
-  ExpectParse("12x", false);
-  ExpectParse("1000001", false);
-  ExpectParse("4294967296", false);
-
   constexpr uint64_t max = std::numeric_limits<uint64_t>::max();
-  constexpr uint64_t max_at_1720 = 10724851205645088148ULL;
-  ExpectDeadline(0U, 0U, 1720U, true, 0U);
-  ExpectDeadline(100U, 10000U, 1000U, true, 10100U);
-  ExpectDeadline(100U, 10000U, 1720U, true, 5913U);
-  ExpectDeadline(0U, max, 1000U, true, max);
-  ExpectDeadline(0U, max, 1720U, true, max_at_1720);
-  ExpectDeadline(max - max_at_1720, max, 1720U, true, max);
-  ExpectDeadline(max - max_at_1720 + 1U, max, 1720U, false);
-  ExpectDeadline(0U, 1U, 999U, false);
-  ExpectDeadline(0U, 1U, 1000001U, false);
+  ExpectDeadline(0U, 0U, 0.5, true, 0U);
+  ExpectDeadline(100U, 10000U, 1.0, true, 10100U);
+  ExpectDeadline(100U, 10000U, 1.72, true, 5914U);
+  ExpectDeadline(100U, 10000U, 0.5, true, 20100U);
+  ExpectDeadline(100U, 10000U, 2.0, true, 5100U);
+  ExpectDeadline(100U, 1U, 2.0, true, 101U);
+  ExpectDeadline(0U, 1000U, 0.001, true, 1000000U);
+  ExpectDeadline(0U, 10000U, 2000.0, true, 5U);
+  ExpectDeadline(0U, max, 1.0, true, max);
+  ExpectDeadline(1U, max, 1.0, false);
+  ExpectDeadline(0U, max, 0.5, false);
+  ExpectDeadline(max - 19U, 10U, 0.5, false);
+  ExpectDeadline(0U, 1U, 0.0, false);
+  ExpectDeadline(0U, 1U, -1.0, false);
+  ExpectDeadline(0U, 1U, std::numeric_limits<double>::quiet_NaN(), false);
+  ExpectDeadline(0U, 1U, std::numeric_limits<double>::infinity(), false);
+  ExpectDeadline(0U, max, std::numeric_limits<double>::denorm_min(), false);
+  ExpectDeadline(0U, 0U, std::numeric_limits<double>::denorm_min(), true, 0U);
   TestReplaySlotWaitsForRelease();
   TestReplaySlotWaitStops();
 
