@@ -1,10 +1,12 @@
 # CaptureFileCamera
 
-`CaptureFileCamera` 是文件回放相机。当前仓库里，它只接受统一内录包：
+`CaptureFileCamera` 是文件回放相机，主要使用统一内录包：
 
 - `frames.bin`
 - `frames.csv`
 - `imu.csv`
+
+`frame_csv_path` 为空时，`file_path` 也可指向历史视频文件，与 IMU CSV 按帧序号配对。
 
 图像帧固定为 `BGR8 raw` 未压缩字节流，按 `720x540` 主口径回放到
 `CameraFrameSync`，用于复现实机相机输入、调试同步、回归视觉流程。
@@ -31,7 +33,7 @@
 
 - `file_path`：帧数据 bin 路径。
 - `imu_csv_path`：IMU CSV 路径。
-- `frame_csv_path`：帧索引 CSV 路径；当前必填。
+- `frame_csv_path`：帧索引 CSV 路径；为空时使用视频回放。
 - `camera_name`：相机名，也是原始 IMU 话题前缀。
 - `image_topic_name`：图像话题名，默认 `camera_image`。
 - `imu_topic_name`：同步后 IMU 话题名，默认 `camera_imu`。
@@ -42,13 +44,20 @@
   布局中 `geometry` 紧跟 `max_frames` 的构造方式，缺少周期时使用此默认值；
   已有回放节奏、倍率和图像几何语义保持不变。
 - `geometry`：帧坐标到原生传感器坐标的固定映射。
+- `replay_speed`：回放倍率，默认 `1.0`；`0.5` 为半速，`2.0` 为两倍速。
+  必须是有限正数，否则初始化报错。两种输入格式都使用该倍率；`realtime: false`
+  时不限速。倍率只改变播放节奏，不修改图像、IMU 的录制时间戳或档位触发周期。
+
+每轮以第一帧为计时起点，按录制相对时间除以倍率，在发布对应 IMU 和图像前等待。
+循环播放时重新计时，录制时间戳仍回到文件起点。解码或下游处理较慢时不为追赶倍率丢帧。
+等待使用毫秒级时钟；无法表示的目标时间会记录错误并停止回放。
 
 测试环境可以用环境变量覆盖部分参数：
 
 - `CAPTURE_FILE_CAMERA_MAX_FRAMES`：限制本次回放提交的图像帧数。
 - `CAPTURE_FILE_CAMERA_REALTIME=0`：关闭实时限速。
-- `CAPTURE_FILE_CAMERA_PLAYBACK_RATE_MILLI`：只加速 frame-bin 的 wall-clock 回放节拍；
-  支持 `1000..1000000`，`1720` 表示 `1.72x`，不修改图像或 IMU 的传感器时间戳。
+
+回放倍率仅通过 YAML `replay_speed` 配置。
 
 文件回放要求输入无损：CameraBase 图像池暂时没有空槽时，采集线程保留当前已解码帧并
 等待后重试。等待期间不会重复发布该帧 IMU，也不会推进输入索引；停止请求可以打断等待。

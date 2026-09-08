@@ -58,10 +58,22 @@ static_assert(std::is_constructible_v<RuntimeParam, std::string_view, std::strin
                                       std::string_view, std::string_view,
                                       std::string_view, std::string_view, bool, bool,
                                       uint32_t, uint32_t, FrameGeometry>);
-static_assert(!std::is_constructible_v<RuntimeParam, std::string_view, std::string_view,
-                                       std::string_view, std::string_view,
-                                       std::string_view, std::string_view, bool, bool,
-                                       uint32_t, FrameGeometry, uint32_t>);
+static_assert(std::is_constructible_v<RuntimeParam, std::string_view, std::string_view,
+                                      std::string_view, std::string_view,
+                                      std::string_view, std::string_view, bool, bool,
+                                      uint32_t, FrameGeometry, double>);
+
+inline constexpr RuntimeParam kSlow{"slow.bin", "slow.csv", "imu.csv", "camera",
+                                    "image",    "imu",      true,      true,
+                                    6U,         10000U,     kGeometry, 0.5};
+inline constexpr RuntimeParam kFast{"fast.bin", "fast.csv", "imu.csv", "camera",
+                                    "image",    "imu",      true,      false,
+                                    3U,         kGeometry,  2.0};
+static_assert(kSlow.replay_speed == 0.5);
+static_assert(kFast.replay_speed == 2.0);
+static_assert(kCurrent.replay_speed == 1.0);
+static_assert(kLegacy.replay_speed == 1.0);
+static_assert(kDefault.replay_speed == 1.0);
 
 static_assert(kDefault.file_path == "capture_frames.bin");
 static_assert(kDefault.trigger_period_us == Camera::default_trigger_period_us);

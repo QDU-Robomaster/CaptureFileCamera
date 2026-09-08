@@ -35,6 +35,7 @@ constructor_args:
         reserved: 0
         sample_phase_x_native: 0.0
         sample_phase_y_native: 0.0
+      replay_speed: 1.0
 template_args:
   - Layout:
       width: 720
@@ -56,6 +57,7 @@ depends:
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <opencv2/core.hpp>
 #include <span>
 #include <stdexcept>
@@ -172,6 +174,7 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
         0.0F,
         0.0F,
     };  ///< 整次回放固定复制到每帧的原生采样几何。
+    double replay_speed = 1.0;  ///< 有限正数倍率；仅改变播放节奏，不改变录制时间戳。
 
     RuntimeParam() = default;
 
@@ -183,7 +186,8 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
                            std::string_view image_topic_name_in,
                            std::string_view imu_topic_name_in, bool realtime_in,
                            bool loop_in, uint32_t max_frames_in,
-                           uint32_t trigger_period_us_in, FrameGeometry geometry_in)
+                           uint32_t trigger_period_us_in, FrameGeometry geometry_in,
+                           double replay_speed_in = 1.0)
         : file_path(file_path_in),
           frame_csv_path(frame_csv_path_in),
           imu_csv_path(imu_csv_path_in),
@@ -194,19 +198,24 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
           loop(loop_in),
           max_frames(max_frames_in),
           trigger_period_us(trigger_period_us_in),
-          geometry(geometry_in)
+          geometry(geometry_in),
+          replay_speed(replay_speed_in)
     {
     }
 
     /** Legacy YAML layout where geometry immediately follows max_frames. */
-    constexpr RuntimeParam(
-        std::string_view file_path_in, std::string_view frame_csv_path_in,
-        std::string_view imu_csv_path_in, std::string_view camera_name_in,
-        std::string_view image_topic_name_in, std::string_view imu_topic_name_in,
-        bool realtime_in, bool loop_in, uint32_t max_frames_in, FrameGeometry geometry_in)
+    constexpr RuntimeParam(std::string_view file_path_in,
+                           std::string_view frame_csv_path_in,
+                           std::string_view imu_csv_path_in,
+                           std::string_view camera_name_in,
+                           std::string_view image_topic_name_in,
+                           std::string_view imu_topic_name_in, bool realtime_in,
+                           bool loop_in, uint32_t max_frames_in,
+                           FrameGeometry geometry_in, double replay_speed_in = 1.0)
         : RuntimeParam(file_path_in, frame_csv_path_in, imu_csv_path_in, camera_name_in,
                        image_topic_name_in, imu_topic_name_in, realtime_in, loop_in,
-                       max_frames_in, default_trigger_period_us, geometry_in)
+                       max_frames_in, default_trigger_period_us, geometry_in,
+                       replay_speed_in)
     {
     }
   };
@@ -249,6 +258,12 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
                     .geometry = frame_geometry_,
                     .trigger_period_us = runtime_.trigger_period_us};
     ApplyEnvironmentOverrides();
+    if (!CaptureFileCameraDetail::ValidReplaySpeed(runtime_.replay_speed))
+    {
+      XR_LOG_ERROR("CaptureFileCamera invalid replay_speed=%.6f", runtime_.replay_speed);
+      throw std::runtime_error(
+          "CaptureFileCamera: replay_speed must be finite and positive");
+    }
     LoadImuCsv();
     if (IsFrameBinMode())
     {
@@ -396,29 +411,60 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
   /**
    * @brief 按录制间隔限速；非实时模式直接返回。
    */
-  void SleepReplayPeriodUntil(uint64_t target_timestamp_us)
+  bool SleepReplayPeriodUntil(uint64_t target_timestamp_us)
   {
     if (!runtime_.realtime)
     {
-      return;
+      return running_.load();
     }
 
     const uint64_t now_us = static_cast<uint64_t>(LibXR::Thread::GetTime()) *
                             CaptureFileCameraDetail::microseconds_per_millisecond;
     if (target_timestamp_us <= now_us)
     {
-      return;
+      return running_.load();
     }
 
     const uint64_t remaining_us = target_timestamp_us - now_us;
     const uint64_t sleep_ms =
-        remaining_us / CaptureFileCameraDetail::microseconds_per_millisecond;
-    if (sleep_ms == 0U)
+        remaining_us / CaptureFileCameraDetail::microseconds_per_millisecond +
+        (remaining_us % CaptureFileCameraDetail::microseconds_per_millisecond != 0U);
+    if (sleep_ms > std::numeric_limits<uint32_t>::max())
     {
-      return;
+      XR_LOG_ERROR("CaptureFileCamera replay wait exceeds millisecond timer range");
+      running_.store(false);
+      return false;
     }
     auto replay_sleep_measurement = replay_sleep_duration_.Measure();
     LibXR::Thread::Sleep(static_cast<uint32_t>(sleep_ms));
+    return running_.load();
+  }
+
+  /** @brief 每轮首帧重建播放起点，在对应帧发布前等待。 */
+  bool PaceReplayFrame(std::size_t frame_index, uint64_t timestamp_us,
+                       uint64_t replay_start_us, uint64_t& wall_start_us)
+  {
+    if (!runtime_.realtime)
+    {
+      return running_.load();
+    }
+    if (frame_index == 0U)
+    {
+      wall_start_us = static_cast<uint64_t>(LibXR::Thread::GetTime()) *
+                      CaptureFileCameraDetail::microseconds_per_millisecond;
+    }
+    uint64_t target_wall_us = 0U;
+    if (timestamp_us < replay_start_us ||
+        !CaptureFileCameraDetail::TryReplayDeadlineUs(
+            wall_start_us, timestamp_us - replay_start_us, runtime_.replay_speed,
+            target_wall_us))
+    {
+      XR_LOG_ERROR("CaptureFileCamera invalid replay deadline speed=%.6f",
+                   runtime_.replay_speed);
+      running_.store(false);
+      return false;
+    }
+    return SleepReplayPeriodUntil(target_wall_us);
   }
 
   /**
@@ -433,7 +479,7 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
   /**
    * @brief 应用测试环境变量覆盖。
    *
-   * 环境变量只用于 CI / smoke test 限帧和加速，正常运行配置仍以 YAML 为准。
+   * 环境变量只用于 CI / smoke test 限帧和关闭限速；倍率由 YAML 配置。
    */
   void ApplyEnvironmentOverrides()
   {
@@ -449,17 +495,6 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
     {
       runtime_.realtime = !(env[0] == '0' && env[1] == '\0');
     }
-    if (const char* env = std::getenv("CAPTURE_FILE_CAMERA_PLAYBACK_RATE_MILLI"))
-    {
-      uint32_t parsed = 0U;
-      if (!CaptureFileCameraDetail::ParsePlaybackRateMilli(env, parsed))
-      {
-        XR_LOG_ERROR("CaptureFileCamera invalid playback rate milli: '%s'", env);
-        throw std::runtime_error("CaptureFileCamera: invalid playback rate milli");
-      }
-      playback_rate_milli_ = parsed;
-    }
-    XR_LOG_INFO("CaptureFileCamera playback rate milli=%u", playback_rate_milli_);
   }
 
   /**
@@ -793,24 +828,10 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
         break;
       }
 
-      if (runtime_.realtime && replay_start_us != 0U)
+      if (!PaceReplayFrame(frame_index, replay.imu.timestamp_us, replay_start_us,
+                           wall_start_us))
       {
-        if (wall_start_us == 0U)
-        {
-          wall_start_us = static_cast<uint64_t>(LibXR::Thread::GetTime()) *
-                          CaptureFileCameraDetail::microseconds_per_millisecond;
-        }
-        uint64_t target_wall_us = 0U;
-        if (!CaptureFileCameraDetail::TryReplayDeadlineUs(
-                wall_start_us, replay.imu.timestamp_us - replay_start_us,
-                playback_rate_milli_, target_wall_us))
-        {
-          XR_LOG_ERROR("CaptureFileCamera replay deadline overflow rate_milli=%u",
-                       playback_rate_milli_);
-          running_.store(false);
-          break;
-        }
-        SleepReplayPeriodUntil(target_wall_us);
+        break;
       }
 
       PublishRawImu(replay.imu);
@@ -841,8 +862,7 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
     }
 
     std::size_t frame_index = 0;
-    const uint64_t wall_start_us = static_cast<uint64_t>(LibXR::Thread::GetTime()) *
-                                   CaptureFileCameraDetail::microseconds_per_millisecond;
+    uint64_t wall_start_us = 0U;
     const uint64_t replay_start_us =
         imu_samples_.empty() ? 0U : imu_samples_.front().timestamp_us;
     while (running_.load())
@@ -876,6 +896,7 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
             break;
           }
           video.Rewind();
+          frame_index = 0;
           continue;
         }
       }
@@ -895,18 +916,15 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
       }
 
       const auto& imu = imu_samples_[frame_index];
+      if (!PaceReplayFrame(frame_index, imu.timestamp_us, replay_start_us, wall_start_us))
+      {
+        break;
+      }
       PublishRawImu(imu);
       if (!WriteAndCommitImage(bgr, imu.timestamp_us))
       {
         running_.store(false);
         break;
-      }
-
-      if (runtime_.realtime && replay_start_us != 0U)
-      {
-        const uint64_t target_wall_us =
-            wall_start_us + (imu.timestamp_us - replay_start_us);
-        SleepReplayPeriodUntil(target_wall_us);
       }
 
       ++frame_index;
@@ -944,9 +962,7 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
   std::string frame_csv_path_{};  ///< 帧索引 CSV 路径。
   std::string imu_csv_path_{};    ///< 显式 IMU CSV 路径副本。
 
-  RuntimeParam runtime_{};  ///< 应用环境变量覆盖后的运行时参数。
-  uint32_t playback_rate_milli_ =
-      CaptureFileCameraDetail::default_playback_rate_milli;  ///< wall-clock 倍率。
+  RuntimeParam runtime_{};                    ///< 应用环境变量覆盖后的运行时参数。
   FrameGeometry frame_geometry_{};            ///< 构造时验证并逐帧复制的固定采样几何。
   std::array<CameraProfile, 1U> profiles_{};  ///< 生命周期内稳定的单档描述。
   CaptureFileCameraDetail::VideoInfo video_info_{};  ///< legacy video 模式下的视频信息。
