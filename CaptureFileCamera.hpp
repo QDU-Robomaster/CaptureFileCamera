@@ -3,49 +3,11 @@
 // clang-format off
 /* === MODULE MANIFEST V2 ===
 module_description: 文件回放相机，发布统一 raw frame-bin 内录包与原始 IMU 数据
-constructor_args:
-  - calibration:
-      native_width: 1440
-      native_height: 1080
-      camera_matrix: [2328.6857198980888, 0.0, 733.35646250924742, 0.0, 2328.6701077899961, 540.61872869227727, 0.0, 0.0, 1.0]
-      distortion_model: CameraTypes::DistortionModel::PLUMB_BOB
-      distortion_coefficients: [-0.091821039187099038, 0.46399073468302049, 0.0026098786426372819, 0.0009819586010405485, -0.47512788503104569]
-      rectification_matrix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
-      projection_matrix: [2328.6857198980888, 0.0, 733.35646250924742, 0.0, 0.0, 2328.6701077899961, 540.61872869227727, 0.0, 0.0, 0.0, 1.0, 0.0]
-  - runtime:
-      file_path: "capture_frames.bin"
-      frame_csv_path: "capture_frames.csv"
-      imu_csv_path: "capture_imu.csv"
-      camera_name: "camera"
-      image_topic_name: "camera_image"
-      imu_topic_name: "camera_imu"
-      realtime: true
-      loop: false
-      max_frames: 0
-      trigger_period_us: 10000
-      geometry:
-        width: 720
-        height: 540
-        step: 2160
-        roi_offset_x_native: 0
-        roi_offset_y_native: 0
-        decimation_x: 2
-        decimation_y: 2
-        flags: CameraTypes::FRAME_GEOMETRY_NONE
-        reserved: 0
-        sample_phase_x_native: 0.0
-        sample_phase_y_native: 0.0
-      replay_speed: 1.0
-template_args:
-  - Layout:
-      width: 720
-      height: 540
-      step: 2160
-      encoding: CameraTypes::Encoding::BGR8
-required_hardware: []
 depends:
-  - qdu-future/CameraBase
-  - xrobot-org/DurationStatistics
+- id: QDU-Robomaster/CameraBase
+  ref: same-or-dev
+- id: xrobot-org/DurationStatistics
+  ref: same-or-dev
 === END MANIFEST === */
 // clang-format on
 
@@ -72,11 +34,11 @@ depends:
 #include "CaptureFileCameraInput.hpp"
 #include "CaptureFileCameraVideo.hpp"
 #include "DurationStatistics.hpp"
-#include "app_framework.hpp"
 #include "libxr.hpp"
 #include "libxr_string.hpp"
 #include "logger.hpp"
 #include "message.hpp"
+#include "ramfs.hpp"
 #include "thread.hpp"
 
 /**
@@ -88,7 +50,7 @@ depends:
  * 产物的验证能力。
  */
 template <CameraTypes::FrameLayout FrameLayoutV>
-class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayoutV>
+class CaptureFileCamera : public CameraBase<FrameLayoutV>
 {
  public:
   using Self = CaptureFileCamera<FrameLayoutV>;  ///< 当前模板实例类型。
@@ -223,14 +185,12 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
   /**
    * @brief 构造文件相机，检查输入包后启动后台回放线程。
    *
-   * @param hw 硬件容器，透传给 CameraBase。
-   * @param app 应用管理器，用于注册监控回调。
    * @param calibration 原生传感器坐标系下的不可变相机标定。
    * @param runtime 文件路径、话题名和回放控制参数。
    */
-  explicit CaptureFileCamera(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
-                             CameraCalibration calibration, RuntimeParam runtime)
-      : Base(hw, calibration, runtime.camera_name, runtime.image_topic_name,
+  explicit CaptureFileCamera(LibXR::RamFS& external_ramfs, CameraCalibration calibration,
+                             RuntimeParam runtime)
+      : Base(external_ramfs, calibration, runtime.camera_name, runtime.image_topic_name,
              runtime.imu_topic_name),
         file_path_(runtime.file_path),
         frame_csv_path_(runtime.frame_csv_path),
@@ -277,7 +237,6 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
     }
     running_.store(true);
     capture_thread_ = std::thread(CaptureThreadMain, this);
-    app.Register(*this);
   }
 
   [[nodiscard]] std::span<const CameraProfile> Profiles() const noexcept override
@@ -310,7 +269,7 @@ class CaptureFileCamera : public LibXR::Application, public CameraBase<FrameLayo
   /**
    * @brief 周期性输出回放状态。
    */
-  void OnMonitor() override
+  void OnMonitor()
   {
     const auto video_read = video_read_duration_.GetSummary();
     const auto bgr_convert = bgr_convert_duration_.GetSummary();
