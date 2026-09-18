@@ -188,9 +188,15 @@ class CaptureFileCamera : public CameraBase<FrameLayoutV>
    * @param calibration 原生传感器坐标系下的不可变相机标定。
    * @param runtime 文件路径、话题名和回放控制参数。
    */
-  explicit CaptureFileCamera(LibXR::RamFS& external_ramfs, CameraCalibration calibration,
-                             RuntimeParam runtime)
-      : Base(external_ramfs, calibration, runtime.camera_name, runtime.image_topic_name,
+  static CameraCalibration DefaultCalibration() { return {.native_width = 1440, .native_height = 1080, .camera_matrix = {2328.685719898089, 0.0, 733.3564625092474, 0.0, 2328.670107789996, 540.6187286922773, 0.0, 0.0, 1.0}, .distortion_model = CameraTypes::DistortionModel::PLUMB_BOB, .distortion_coefficients = {-0.09182103918709904, 0.4639907346830205, 0.002609878642637282, 0.0009819586010405485, -0.4751278850310457}, .rectification_matrix = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0}, .projection_matrix = {2328.685719898089, 0.0, 733.3564625092474, 0.0, 0.0, 2328.670107789996, 540.6187286922773, 0.0, 0.0, 0.0, 1.0, 0.0}}; }
+
+  static RuntimeParam DefaultRuntime() { return {}; }
+
+  explicit CaptureFileCamera(
+      LibXR::RamFS& ramfs,
+      CameraCalibration calibration = DefaultCalibration(),
+      RuntimeParam runtime = DefaultRuntime())
+      : Base(ramfs, calibration, runtime.camera_name, runtime.image_topic_name,
              runtime.imu_topic_name),
         file_path_(runtime.file_path),
         frame_csv_path_(runtime.frame_csv_path),
