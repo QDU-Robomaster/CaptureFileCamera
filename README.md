@@ -196,34 +196,23 @@ The raw IMU Topics are in the default domain (`libxr_def_domain`). CaptureFileCa
 
 ## 5. 配置示例 / Configuration Example
 
-`xrobot instance add QDU-Robomaster/CaptureFileCamera` 与 `xrobot sync` 写出的实例以 `DefaultCalibration()` 和 `DefaultRuntime()` 作为 `calibration` 与 `runtime` 的默认值。以下实例取自 `bsp-linux-autoaim-replay` 的配置，使用视频模式（`frame_csv_path_in` 为空），`MainFrameLayout`、`MainCameraCalibration` 与 `MainFrameGeometry` 在该配置的 `constexprs` 中定义，`ramfs` 为 BSP 中用 `XR_REGISTER`（硬件注册）注册的 `LibXR::RamFS` 对象名：
+`xrobot instance add QDU-Robomaster/CaptureFileCamera --template-arg <FrameLayout>` 写入的实例，`calibration` 与 `runtime` 为工具写入的 C++ 表达式 `DefaultCalibration()` 与 `DefaultRuntime()`，`ramfs` 为 BSP 中用 `XR_REGISTER`（硬件注册）注册的 `LibXR::RamFS` 对象名。`template_args` 取 720x540 的 BGR8 布局，与默认标定的 1440x1080 原生范围和默认 `geometry` 的 2 倍下采样一致；回放文件路径、Topic 名称和回放控制取第 3 节表中的默认值：
 
 ```yaml
 modules:
   - module: QDU-Robomaster/CaptureFileCamera
     id: camera
     template_args:
-      - AutoAimRunConfig::MainFrameLayout
+      - CameraTypes::FrameLayout{.width=720,.height=540,.step=2160,.encoding=CameraTypes::Encoding::BGR8}
     args:
       - ramfs: ramfs
-      - calibration: AutoAimRunConfig::MainCameraCalibration
-      - runtime:
-          file_path_in: "./data/camera_internal_recording_20260428/damo_clean.avi"
-          frame_csv_path_in: ""
-          imu_csv_path_in: "./data/camera_internal_recording_20260428/damo_imu.csv"
-          camera_name_in: "capturefile_camera"
-          image_topic_name_in: "capturefile_image"
-          imu_topic_name_in: "capturefile_imu"
-          realtime_in: true
-          loop_in: false
-          max_frames_in: 0
-          geometry_in: AutoAimRunConfig::MainFrameGeometry
-          replay_speed_in: 1.0
+      - calibration: CaptureFileCamera<CameraTypes::FrameLayout{.width=720,.height=540,.step=2160,.encoding=CameraTypes::Encoding::BGR8}>::DefaultCalibration()
+      - runtime: CaptureFileCamera<CameraTypes::FrameLayout{.width=720,.height=540,.step=2160,.encoding=CameraTypes::Encoding::BGR8}>::DefaultRuntime()
 ```
 
 `runtime` 写成 YAML 映射时，键为所选构造函数的参数名（带 `_in` 后缀），顺序与该构造函数一致；字符串写成带引号的 C++ 字符串字面量。使用 `frames.bin` 内录包时，`file_path_in` 指向 `*_frames.bin`，`frame_csv_path_in` 指向 `*_frames.csv`。后续的 CameraFrameSync 实例以 `camera: camera` 引用本实例，须列在本实例之后。
 
-The instance written by `xrobot instance add QDU-Robomaster/CaptureFileCamera` and `xrobot sync` uses `DefaultCalibration()` and `DefaultRuntime()` as the defaults of `calibration` and `runtime`. The instance in the YAML block above is taken from the configuration of `bsp-linux-autoaim-replay`. It uses video mode (`frame_csv_path_in` is empty); `MainFrameLayout`, `MainCameraCalibration` and `MainFrameGeometry` are defined in the `constexprs` of that configuration, and `ramfs` is the name of the `LibXR::RamFS` object registered in the BSP with `XR_REGISTER` (Registration).
+The instance written by `xrobot instance add QDU-Robomaster/CaptureFileCamera --template-arg <FrameLayout>`, where `calibration` and `runtime` are the C++ expressions `DefaultCalibration()` and `DefaultRuntime()` written by the tool, and `ramfs` is the name of the `LibXR::RamFS` object registered in the BSP with `XR_REGISTER` (Registration). `template_args` takes a 720x540 BGR8 layout, which matches the 1440x1080 native range of the default calibration and the decimation of 2 of the default `geometry`; the replay file paths, Topic names and replay control take the defaults in the table of section 3.
 
 When `runtime` is written as a YAML mapping, the keys are the parameter names of the chosen constructor (with the `_in` suffix) in the order of that constructor, and strings are written as quoted C++ string literals. With a `frames.bin` recording, `file_path_in` points to `*_frames.bin` and `frame_csv_path_in` points to `*_frames.csv`. A following CameraFrameSync instance references this instance with `camera: camera` and is listed after it.
 
