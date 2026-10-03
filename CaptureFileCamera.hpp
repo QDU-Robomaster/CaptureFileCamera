@@ -2,7 +2,7 @@
 
 // clang-format off
 /* === MODULE MANIFEST V2 ===
-module_description: 文件回放相机，发布统一 raw frame-bin 内录包与原始 IMU 数据
+module_description: 文件回放相机：回放内录的图像与 IMU 数据并发布 / File replay camera that publishes recorded images and IMU data
 depends:
 - id: QDU-Robomaster/CameraBase
   ref: same-or-dev
@@ -45,9 +45,8 @@ depends:
  * @class CaptureFileCamera
  * @brief 文件相机源，用统一 raw frame-bin 内录包按 CameraBase 接口发布数据。
  *
- * 当前仓库主口径优先使用 `frames.bin + frames.csv + imu.csv`；当 `frame_csv_path`
- * 为空时，仍允许受控退回到历史 `video + imu.csv` 回放面，主要用于保留旧 replay
- * 产物的验证能力。
+ * 内录包为 `frames.bin + frames.csv + imu.csv`；`frame_csv_path` 为空时，
+ * 按 `video + imu.csv` 回放。
  */
 template <CameraTypes::FrameLayout FrameLayoutV>
 class CaptureFileCamera : public CameraBase<FrameLayoutV>
@@ -93,7 +92,7 @@ class CaptureFileCamera : public CameraBase<FrameLayoutV>
    */
   static constexpr int frame_height = static_cast<int>(frame_layout.height);
 
-  /** Legacy replay configurations use this period when none is provided. */
+  /// 未给出触发周期时使用的默认周期，单位微秒。
   static constexpr uint32_t default_trigger_period_us = 10000U;
 
   static_assert(frame_layout.encoding == CameraTypes::Encoding::BGR8,
@@ -140,7 +139,7 @@ class CaptureFileCamera : public CameraBase<FrameLayoutV>
 
     RuntimeParam() = default;
 
-    /** Current YAML layout with an explicit trigger period. */
+    /** 带显式触发周期的构造方式。 */
     constexpr RuntimeParam(std::string_view file_path_in,
                            std::string_view frame_csv_path_in,
                            std::string_view imu_csv_path_in,
@@ -165,7 +164,7 @@ class CaptureFileCamera : public CameraBase<FrameLayoutV>
     {
     }
 
-    /** Legacy YAML layout where geometry immediately follows max_frames. */
+    /** 省略触发周期的构造方式，geometry 紧跟 max_frames。 */
     constexpr RuntimeParam(std::string_view file_path_in,
                            std::string_view frame_csv_path_in,
                            std::string_view imu_csv_path_in,
@@ -182,12 +181,6 @@ class CaptureFileCamera : public CameraBase<FrameLayoutV>
     }
   };
 
-  /**
-   * @brief 构造文件相机，检查输入包后启动后台回放线程。
-   *
-   * @param calibration 原生传感器坐标系下的不可变相机标定。
-   * @param runtime 文件路径、话题名和回放控制参数。
-   */
   static CameraCalibration DefaultCalibration() { return {.native_width = 1440, .native_height = 1080, .camera_matrix = {2328.685719898089, 0.0, 733.3564625092474, 0.0, 2328.670107789996, 540.6187286922773, 0.0, 0.0, 1.0}, .distortion_model = CameraTypes::DistortionModel::PLUMB_BOB, .distortion_coefficients = {-0.09182103918709904, 0.4639907346830205, 0.002609878642637282, 0.0009819586010405485, -0.4751278850310457}, .rectification_matrix = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0}, .projection_matrix = {2328.685719898089, 0.0, 733.3564625092474, 0.0, 0.0, 2328.670107789996, 540.6187286922773, 0.0, 0.0, 0.0, 1.0, 0.0}}; }
 
   static RuntimeParam DefaultRuntime() { return {}; }
@@ -568,7 +561,7 @@ class CaptureFileCamera : public CameraBase<FrameLayoutV>
   }
 
   /**
-   * @brief 统一内录包只允许未压缩 `BGR8 raw` 图像帧。
+   * @brief 检查帧索引记录均为未压缩 `BGR8 raw` 图像帧，否则抛出异常。
    */
   void ValidateFrameRecordsAreRawBgr() const
   {
@@ -930,7 +923,7 @@ class CaptureFileCamera : public CameraBase<FrameLayoutV>
   RuntimeParam runtime_{};                    ///< 应用环境变量覆盖后的运行时参数。
   FrameGeometry frame_geometry_{};            ///< 构造时验证并逐帧复制的固定采样几何。
   std::array<CameraProfile, 1U> profiles_{};  ///< 生命周期内稳定的单档描述。
-  CaptureFileCameraDetail::VideoInfo video_info_{};  ///< legacy video 模式下的视频信息。
+  CaptureFileCameraDetail::VideoInfo video_info_{};  ///< 视频模式下的视频信息。
   std::vector<ImuSample> imu_samples_{};             ///< CSV 中加载的全部 IMU 数据。
   std::vector<FrameRecord> frame_records_{};         ///< 帧索引 CSV 内容。
   std::vector<FrameBinReplayFrame> frame_bin_replay_frames_{};  ///< bin 模式下已对齐帧。
