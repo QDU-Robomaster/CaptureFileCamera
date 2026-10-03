@@ -81,19 +81,11 @@ A recording consists of three files:
 - `frame_csv_path` points to `*_frames.csv`, which stores the frame index.
 - `imu_csv_path` points to `*_imu.csv`, which stores the IMU data.
 
-The columns of the frame index CSV are:
-
-```text
-frame_index,camera_timestamp_us,offset_bytes,size_bytes[,codec]
-```
+The columns of the frame index CSV are those in the first code block above.
 
 `offset_bytes` and `size_bytes` locate one image in the bin file; the construction checks that they lie within the file. When `codec` is `raw` (case-insensitive), or is omitted and `size_bytes` equals `CameraBase::image_bytes`, the frame is read as uncompressed BGR8 and its size must equal `image_bytes`. All other records are decoded by OpenCV `imdecode`; 8-bit grayscale, BGR and BGRA are converted to BGR8, and the decoded size must match the layout.
 
-The columns of the IMU CSV are:
-
-```text
-timestamp_us,qw,qx,qy,qz,gx,gy,gz,ax,ay,az
-```
+The columns of the IMU CSV are those in the second code block above.
 
 - `timestamp_us`: sensor timestamp in us.
 - `qw,qx,qy,qz`: attitude quaternion in `wxyz` order.
@@ -231,30 +223,7 @@ modules:
 
 `runtime` 写成 YAML 映射时，键为所选构造函数的参数名（带 `_in` 后缀），顺序与该构造函数一致；字符串写成带引号的 C++ 字符串字面量。使用 `frames.bin` 内录包时，`file_path_in` 指向 `*_frames.bin`，`frame_csv_path_in` 指向 `*_frames.csv`。后续的 CameraFrameSync 实例以 `camera: camera` 引用本实例，须列在本实例之后。
 
-The instance written by `xrobot instance add QDU-Robomaster/CaptureFileCamera` and `xrobot sync` uses `DefaultCalibration()` and `DefaultRuntime()` as the defaults of `calibration` and `runtime`. The following instance is taken from the configuration of `bsp-linux-autoaim-replay`. It uses video mode (`frame_csv_path_in` is empty); `MainFrameLayout`, `MainCameraCalibration` and `MainFrameGeometry` are defined in the `constexprs` of that configuration, and `ramfs` is the name of the `LibXR::RamFS` object registered in the BSP with `XR_REGISTER` (Registration):
-
-```yaml
-modules:
-  - module: QDU-Robomaster/CaptureFileCamera
-    id: camera
-    template_args:
-      - AutoAimRunConfig::MainFrameLayout
-    args:
-      - ramfs: ramfs
-      - calibration: AutoAimRunConfig::MainCameraCalibration
-      - runtime:
-          file_path_in: "./data/camera_internal_recording_20260428/damo_clean.avi"
-          frame_csv_path_in: ""
-          imu_csv_path_in: "./data/camera_internal_recording_20260428/damo_imu.csv"
-          camera_name_in: "capturefile_camera"
-          image_topic_name_in: "capturefile_image"
-          imu_topic_name_in: "capturefile_imu"
-          realtime_in: true
-          loop_in: false
-          max_frames_in: 0
-          geometry_in: AutoAimRunConfig::MainFrameGeometry
-          replay_speed_in: 1.0
-```
+The instance written by `xrobot instance add QDU-Robomaster/CaptureFileCamera` and `xrobot sync` uses `DefaultCalibration()` and `DefaultRuntime()` as the defaults of `calibration` and `runtime`. The instance in the YAML block above is taken from the configuration of `bsp-linux-autoaim-replay`. It uses video mode (`frame_csv_path_in` is empty); `MainFrameLayout`, `MainCameraCalibration` and `MainFrameGeometry` are defined in the `constexprs` of that configuration, and `ramfs` is the name of the `LibXR::RamFS` object registered in the BSP with `XR_REGISTER` (Registration).
 
 When `runtime` is written as a YAML mapping, the keys are the parameter names of the chosen constructor (with the `_in` suffix) in the order of that constructor, and strings are written as quoted C++ string literals. With a `frames.bin` recording, `file_path_in` points to `*_frames.bin` and `frame_csv_path_in` points to `*_frames.csv`. A following CameraFrameSync instance references this instance with `camera: camera` and is listed after it.
 
