@@ -178,7 +178,7 @@ The default `geometry` takes the width, height and step of the layout, uses ROI 
 
 | Topic | 方向 | 类型 | 说明 |
 | --- | --- | --- | --- |
-| `param.image_topic_name`（默认 `camera_image`） | 发布 | `const SharedFrame*`（CameraBase） | 每提交一帧图像发布一次，指针仅在同步回调期间有效 |
+| `runtime.image_topic_name`（默认 `camera_image`） | 发布 | `const SharedFrame*`（CameraBase） | 每提交一帧图像发布一次，指针仅在同步回调期间有效 |
 | `<camera_name>_gyro` | 发布 | `Eigen::Matrix<float, 3, 1>` | 原始角速度，单位 rad/s，Topic timestamp 为 CSV 的 `timestamp_us` |
 | `<camera_name>_accl` | 发布 | `Eigen::Matrix<float, 3, 1>` | 原始线加速度，单位 m/s^2，Topic timestamp 为 CSV 的 `timestamp_us` |
 | `<camera_name>_quat` | 发布 | `LibXR::Quaternion<float>` | 原始姿态四元数，Topic timestamp 为 CSV 的 `timestamp_us` |
@@ -187,7 +187,7 @@ The default `geometry` takes the width, height and step of the layout, uses ROI 
 
 | Topic | Direction | Type | Meaning |
 | --- | --- | --- | --- |
-| `param.image_topic_name` (default `camera_image`) | Publish | `const SharedFrame*` (CameraBase) | Published once per committed image; the pointer is valid only during the synchronous callback |
+| `runtime.image_topic_name` (default `camera_image`) | Publish | `const SharedFrame*` (CameraBase) | Published once per committed image; the pointer is valid only during the synchronous callback |
 | `<camera_name>_gyro` | Publish | `Eigen::Matrix<float, 3, 1>` | Raw angular velocity in rad/s, Topic timestamp is the CSV `timestamp_us` |
 | `<camera_name>_accl` | Publish | `Eigen::Matrix<float, 3, 1>` | Raw linear acceleration in m/s^2, Topic timestamp is the CSV `timestamp_us` |
 | `<camera_name>_quat` | Publish | `LibXR::Quaternion<float>` | Raw attitude quaternion, Topic timestamp is the CSV `timestamp_us` |
