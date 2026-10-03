@@ -1,131 +1,112 @@
 # CaptureFileCamera
 
-`CaptureFileCamera` 是文件回放相机，主要使用统一内录包：
+文件回放相机：回放内录的图像与 IMU 数据并发布 / File replay camera that publishes recorded images and IMU data
 
-- `frames.bin`
-- `frames.csv`
-- `imu.csv`
+## 1. 模块作用 / Purpose
 
-`frame_csv_path` 为空时，`file_path` 也可指向历史视频文件，与 IMU CSV 按帧序号配对。
+CaptureFileCamera 是 `CameraBase<FrameLayoutV>` 的派生类，从内录包读取图像和 IMU 数据，按录制时间戳回放，并通过 CameraBase 接口发布。内录包由 `frames.bin`、`frames.csv` 和 `imu.csv` 组成（格式见第 2 节）；`frame_csv_path` 为空时，`file_path` 作为视频文件打开，视频帧与 IMU CSV 的行按序号配对。
 
-图像按 `FrameLayoutV` 的 BGR8 布局写入 CameraBase 并发布，同时发布原始 IMU，用于复现
-实机相机输入、调试 `CameraFrameSync` 同步、回归视觉流程。它不模拟 Hik 相机触发延迟，
-也不从图像像素中读取额外信息。
+构造时，CaptureFileCamera 加载并校验 IMU CSV、帧索引 CSV 和帧数据 bin（或打开视频），随后启动一个后台线程回放。任何加载或校验错误都在构造时抛出异常。回放线程对每一帧先发布原始 IMU，再把 BGR8 图像写入 CameraBase 的图像槽并提交，因此图像与 IMU 复现实机相机的输入，可用于调试 `CameraFrameSync` 的同步和回归视觉流程。
 
-## 相机几何
+`realtime` 为 `true` 时，每一轮回放以第一帧为计时起点，在发布每一帧之前等待到该帧的录制相对时间除以 `replay_speed`。循环播放时重新计时，录制时间戳仍回到文件起点。回放线程处理较慢时，帧按序逐帧提交。等待使用毫秒级时钟，无法表示的目标时间会记录错误并停止回放。`realtime` 为 `false` 时不限速。`replay_speed` 只改变播放节奏，图像和 IMU 的录制时间戳以及档位触发周期保持原值。
 
-- 模板参数 `FrameLayoutV` 固定帧缓冲区宽高、步长和编码；必须是紧密排列的 BGR8
-  （`step == width * 3`，编译期检查）。
-- 构造参数 `calibration` 是原生传感器坐标系下的固定 `CameraCalibration`。
-- `runtime.geometry` 是本次回放固定使用的 `FrameGeometry`，会按值复制到每个
-  `ImageFrame`。
+CameraBase 的图像池没有空槽时，回放线程保留当前已解码的帧，每 1 ms 重试一次。等待期间该帧的 IMU 不会重复发布，输入索引也保持不变；析构时的停止请求可以中断等待。
 
-构造时会验证 geometry 的尺寸、步长、下采样、ROI 和原生边界。内录包的像素尺寸必须与
-`FrameLayoutV` 一致。默认值对应 wide 回放：原生 `1440x1080` 标定，`720x540` 布局，
-ROI 偏移 0、2x2 下采样几何。
+读取或解码失败、帧尺寸与布局不符时，回放停止。到达文件末尾时，`loop` 为 `false` 则停止，为 `true` 则从头开始；提交帧数达到 `max_frames`（非 0）时停止。
 
-文件相机只公布一个固定档位（`WIDE`，周期为 `trigger_period_us`）。请求该档位直接返回
-其逐帧 geometry；请求其他档位返回 `NOT_SUPPORT`，不会改变回放状态。
+环境变量可以在测试中覆盖部分参数：
 
-## 回放节奏
+- `CAPTURE_FILE_CAMERA_MAX_FRAMES`：大于 0 时作为 `max_frames`。
+- `CAPTURE_FILE_CAMERA_REALTIME`：取值 `0` 时关闭限速，其他取值开启限速。
 
-构造时加载并校验 IMU CSV、帧索引 CSV 和帧数据 bin（或打开视频），任何错误都会抛出
-异常；随后启动一个后台线程回放。
+文件相机只提供一个固定档位 `WIDE`，触发周期为 `trigger_period_us`。`SwitchProfile(WIDE)` 返回该档位的逐帧 geometry；请求其他档位返回 `NOT_SUPPORT`，回放状态不变。`SetExposure()` 与 `SetGain()` 为空实现，用于满足 CameraBase 接口。
 
-`realtime: true` 时，每轮以第一帧为计时起点，按录制相对时间除以 `replay_speed`，在发布
-对应 IMU 和图像前等待。循环播放时重新计时，录制时间戳仍回到文件起点。解码或下游处理
-较慢时不为追赶倍率丢帧。等待使用毫秒级时钟；无法表示的目标时间会记录错误并停止回放。
-`realtime: false` 时不限速。倍率只改变播放节奏，不修改图像、IMU 的录制时间戳或档位
-触发周期。
+`OnMonitor()` 打印累计提交帧数、已发布 IMU 组数、运行状态和本周期提交帧数，以及读帧、BGR 转换、IMU 发布、图像提交和限速等待的耗时统计（单位 us）。
 
-每帧先发布对应的原始 IMU，再写入并提交图像。文件回放要求输入无损：CameraBase 图像池
-暂时没有空槽时，回放线程保留当前已解码帧并每 1 ms 重试。等待期间不会重复发布该帧 IMU，
-也不会推进输入索引；析构时的停止请求可以打断等待。这是文件源的背压策略，不代表实时相机
-能在外部触发持续运行时保留所有物理帧。
+CaptureFileCamera derives from `CameraBase<FrameLayoutV>`. It reads images and IMU data from a recording, replays them according to the recorded timestamps and publishes them through the CameraBase interface. A recording consists of `frames.bin`, `frames.csv` and `imu.csv` (format in section 2). When `frame_csv_path` is empty, `file_path` is opened as a video file and the video frames are paired with the rows of the IMU CSV by index.
 
-读取或解码失败、帧尺寸不符时停止回放。到达文件末尾时，`loop: false` 停止，`loop: true`
-从头开始；达到 `max_frames` 时停止。
+At construction, CaptureFileCamera loads and validates the IMU CSV, the frame index CSV and the frame data bin (or opens the video), and then starts a background thread for the replay. Any loading or validation error is thrown as an exception at construction. For every frame the replay thread first publishes the raw IMU, then writes the BGR8 image into a CameraBase image slot and commits it. The images and the IMU data thus reproduce the input of a real camera, which supports debugging the synchronization of `CameraFrameSync` and regression runs of the vision pipeline.
 
-测试环境可以用环境变量覆盖部分参数：
+With `realtime` set to `true`, each replay round takes the first frame as the timing origin and waits before publishing each frame until the recorded relative time of that frame divided by `replay_speed`. When looping, the timing restarts and the recorded timestamps return to the start of the file. When the replay thread runs late, frames are committed one after another in order. The wait uses a millisecond clock, and a target time that cannot be represented is logged as an error and stops the replay. With `realtime` set to `false` the replay is not rate limited. `replay_speed` only changes the replay pace; the recorded timestamps of images and IMU data and the trigger period of the profile keep their values.
 
-- `CAPTURE_FILE_CAMERA_MAX_FRAMES`：限制本次回放提交的图像帧数（大于 0 时生效）。
-- `CAPTURE_FILE_CAMERA_REALTIME=0`：关闭实时限速。
+When the CameraBase image pool has no free slot, the replay thread keeps the current decoded frame and retries every 1 ms. The IMU of that frame is not published again during the wait and the input index stays unchanged; a stop request from the destructor can interrupt the wait.
 
-回放倍率仅通过配置 `replay_speed` 设置。
+The replay stops when reading or decoding fails or a frame size does not match the layout. At the end of the file it stops when `loop` is `false` and restarts from the beginning when `loop` is `true`; it also stops when the number of committed frames reaches `max_frames` (non-zero).
 
-## 帧数据 Bin
+Environment variables can override some parameters in tests:
 
-统一内录包使用：
+- `CAPTURE_FILE_CAMERA_MAX_FRAMES`: used as `max_frames` when greater than 0.
+- `CAPTURE_FILE_CAMERA_REALTIME`: the value `0` disables rate limiting, any other value enables it.
 
-- `file_path` 指向 `*_frames.bin`。
-- `frame_csv_path` 指向 `*_frames.csv`。
-- `imu_csv_path` 指向 `*_imu.csv`。
+The file camera provides one fixed profile `WIDE`, whose trigger period is `trigger_period_us`. `SwitchProfile(WIDE)` returns the per-frame geometry of that profile; any other profile returns `NOT_SUPPORT` and the replay state is unchanged. `SetExposure()` and `SetGain()` are empty implementations that satisfy the CameraBase interface.
 
-帧索引 CSV 列顺序为：
+`OnMonitor()` prints the total number of committed frames, the number of published IMU groups, the running state and the number of frames committed in the period, followed by timing statistics (in us) for frame reading, BGR conversion, IMU publishing, image commit and rate-limit waiting.
+
+## 2. 内录包格式 / Recording Format
+
+统一内录包由三个文件组成：
+
+- `file_path` 指向 `*_frames.bin`，保存图像数据。
+- `frame_csv_path` 指向 `*_frames.csv`，保存帧索引。
+- `imu_csv_path` 指向 `*_imu.csv`，保存 IMU 数据。
+
+帧索引 CSV 的列顺序为：
 
 ```text
 frame_index,camera_timestamp_us,offset_bytes,size_bytes[,codec]
 ```
 
-`offset_bytes` 和 `size_bytes` 指向 bin 文件中的一帧图像，构造时检查其落在文件范围内。
-`codec` 为 `raw`（不区分大小写），或缺省且 `size_bytes == CameraBase::image_bytes` 时，
-该帧按未压缩 BGR8 读取，大小必须等于 `image_bytes`；其他记录交给 OpenCV `imdecode`
-解码（8 位灰度、BGR、BGRA 统一转为 BGR8），解码结果尺寸必须与布局一致。
+`offset_bytes` 与 `size_bytes` 指向 bin 文件中的一帧图像，构造时检查其落在文件范围内。`codec` 为 `raw`（不区分大小写），或缺省且 `size_bytes` 等于 `CameraBase::image_bytes` 时，该帧按未压缩 BGR8 读取，大小必须等于 `image_bytes`。其他记录交给 OpenCV `imdecode` 解码，8 位灰度、BGR、BGRA 统一转为 BGR8，解码结果的尺寸必须与布局一致。
 
-模块用 `camera_timestamp_us` 和 IMU CSV 的 `timestamp_us` 对齐，只播放能找到同 timestamp
-IMU 的图像帧，其余帧跳过（启动日志给出跳过数量）。没有任何对齐帧时构造失败。图像时间戳
-为 `camera_timestamp_us`。
-
-两种 CSV 都可以包含空行、以 `#` 开头的注释行，以及第一条数据前的一行表头。最后一行
-如果因为录制结束被截断，会被忽略；其他无法解析的行会让构造失败。
-
-## 历史视频
-
-`frame_csv_path` 为空时，`file_path` 由 OpenCV 按视频打开，第 N 帧与 IMU CSV 第 N 行配对，
-图像时间戳取该 IMU 行的 `timestamp_us`。视频尺寸必须与布局一致，解码结果统一转为 BGR8。
-
-## IMU CSV
-
-IMU CSV 列顺序为：
+IMU CSV 的列顺序为：
 
 ```text
 timestamp_us,qw,qx,qy,qz,gx,gy,gz,ax,ay,az
 ```
 
-字段含义：
-
-- `timestamp_us`：传感器时间戳，单位微秒。
+- `timestamp_us`：传感器时间戳，单位 us。
 - `qw,qx,qy,qz`：姿态四元数，顺序为 `wxyz`。
-- `gx,gy,gz`：角速度，单位 `rad/s`。
-- `ax,ay,az`：线加速度，单位 `m/s^2`。
+- `gx,gy,gz`：角速度，单位 rad/s。
+- `ax,ay,az`：线加速度，单位 m/s^2。
 
-## 输出
+CaptureFileCamera 用帧索引 CSV 的 `camera_timestamp_us` 与 IMU CSV 的 `timestamp_us` 对齐，回放包含能找到同 timestamp IMU 的图像帧，其余帧被跳过，启动日志给出跳过数量。没有任何对齐帧时构造失败。图像时间戳为 `camera_timestamp_us`。
 
-图像写入 `CameraBase` 图像缓冲区，并发布到 `image_topic_name`。
+视频模式（`frame_csv_path` 为空）下，`file_path` 由 OpenCV 按视频打开，第 N 帧与 IMU CSV 的第 N 行配对，图像时间戳取该 IMU 行的 `timestamp_us`。视频尺寸必须与布局一致，解码结果统一转为 BGR8。
 
-原始 IMU 按 `camera_name` 生成三个默认 domain（`libxr_def_domain`）中的话题，Topic
-timestamp 使用 CSV 的 `timestamp_us`：
+两种 CSV 都可以包含空行、以 `#` 开头的注释行，以及第一条数据之前的一行表头。文件以无换行结束的最后一行无法解析时，该行被忽略并记录警告；其他无法解析的行使构造失败。
 
-- `<camera_name>_gyro`：`Eigen::Matrix<float, 3, 1>`。
-- `<camera_name>_accl`：`Eigen::Matrix<float, 3, 1>`。
-- `<camera_name>_quat`：`LibXR::Quaternion<float>`。
+A recording consists of three files:
 
-`CaptureFileCamera` 只发布原始 IMU，不发布同步结果。回放包中没有 CameraSync 触发事件，
-与 CameraFrameSync 配合时通常使用 `LATEST_IMU` 模式，并把其 `host_topic_domain_name`
-设为 `"libxr_def_domain"`。
+- `file_path` points to `*_frames.bin`, which stores the image data.
+- `frame_csv_path` points to `*_frames.csv`, which stores the frame index.
+- `imu_csv_path` points to `*_imu.csv`, which stores the IMU data.
 
-`SetExposure()` / `SetGain()` 为空操作，CameraBase 的 RamFS 命令对文件相机无效果。
+The columns of the frame index CSV are:
 
-`OnMonitor()` 打印累计提交帧数、已发布 IMU 组数、运行状态和本周期提交帧数，以及读帧、
-BGR 转换、IMU 发布、图像提交和限速等待的耗时统计（微秒）。
+```text
+frame_index,camera_timestamp_us,offset_bytes,size_bytes[,codec]
+```
 
-## 依赖
+`offset_bytes` and `size_bytes` locate one image in the bin file; the construction checks that they lie within the file. When `codec` is `raw` (case-insensitive), or is omitted and `size_bytes` equals `CameraBase::image_bytes`, the frame is read as uncompressed BGR8 and its size must equal `image_bytes`. All other records are decoded by OpenCV `imdecode`; 8-bit grayscale, BGR and BGRA are converted to BGR8, and the decoded size must match the layout.
 
-- `QDU-Robomaster/CameraBase`：相机基类与共享图像槽。
-- `xrobot-org/DurationStatistics`：`OnMonitor()` 中的耗时统计。
-- 外部：OpenCV 4（`core`、`imgproc`、`imgcodecs`、`videoio`），Eigen。
+The columns of the IMU CSV are:
 
-## 构造接口
+```text
+timestamp_us,qw,qx,qy,qz,gx,gy,gz,ax,ay,az
+```
+
+- `timestamp_us`: sensor timestamp in us.
+- `qw,qx,qy,qz`: attitude quaternion in `wxyz` order.
+- `gx,gy,gz`: angular velocity in rad/s.
+- `ax,ay,az`: linear acceleration in m/s^2.
+
+CaptureFileCamera aligns the `camera_timestamp_us` of the frame index CSV with the `timestamp_us` of the IMU CSV. The replay contains the image frames for which an IMU with the same timestamp exists, the other frames are skipped, and the startup log reports the number of skipped frames. The construction fails when no frame is aligned. The image timestamp is `camera_timestamp_us`.
+
+In video mode (`frame_csv_path` empty), `file_path` is opened as a video by OpenCV, frame N is paired with row N of the IMU CSV, and the image timestamp is the `timestamp_us` of that IMU row. The video size must match the layout, and the decoded frames are converted to BGR8.
+
+Both CSV files may contain empty lines, comment lines starting with `#`, and one header line before the first data row. A last line of the file that ends without a line break and cannot be parsed is ignored with a warning; any other line that cannot be parsed makes the construction fail.
+
+## 3. 构造接口 / Constructor
 
 ```cpp
 template <CameraTypes::FrameLayout FrameLayoutV>
@@ -134,113 +115,165 @@ class CaptureFileCamera : public CameraBase<FrameLayoutV>;
 explicit CaptureFileCamera(
     LibXR::RamFS& ramfs,
     CameraCalibration calibration = DefaultCalibration(),
-    RuntimeParam runtime = DefaultRuntime());
+    RuntimeParam runtime = DefaultRuntime());  // 节选 / excerpt
 ```
 
 模板参数：
 
-- `FrameLayoutV`：帧布局，紧密排列 BGR8，必须与回放数据的图像尺寸一致。
+- `FrameLayoutV`：帧布局 `CameraTypes::FrameLayout`，为紧密排列的 BGR8（`step == width * 3`，编译期检查），与回放数据的图像尺寸一致。
 
 依赖：
 
-- `ramfs`：`LibXR::RamFS`，注册 CameraBase 的相机命令文件。
+- `ramfs`：`LibXR::RamFS`，CameraBase 在其中注册相机命令文件。
 
-配置：
+配置参数：
 
-- `calibration`：原生标定。默认 `DefaultCalibration()` 为 1440x1080、
-  `fx ≈ fy ≈ 2328.7`、`PLUMB_BOB` 五项畸变的实机标定。
-- `runtime`（`RuntimeParam`）：
+- `calibration`：原生传感器坐标系下的 `CameraCalibration`，默认 `DefaultCalibration()`：1440x1080，`fx ≈ fy ≈ 2328.7`，`PLUMB_BOB` 畸变模型，五项畸变系数。
+- `runtime`：`RuntimeParam`，字段见下表。
 
 | 字段 | 默认值 | 说明 |
 | --- | --- | --- |
 | `file_path` | `"capture_frames.bin"` | 帧数据 bin 路径；`frame_csv_path` 为空时为视频路径。 |
-| `frame_csv_path` | `"capture_frames.csv"` | 帧索引 CSV 路径；为空时使用视频回放。 |
+| `frame_csv_path` | `"capture_frames.csv"` | 帧索引 CSV 路径；为空时使用视频模式。 |
 | `imu_csv_path` | `"capture_imu.csv"` | IMU CSV 路径。 |
-| `camera_name` | `"camera"` | 相机名、原始 IMU 话题前缀和 RamFS 命令文件名。 |
-| `image_topic_name` | `"camera_image"` | 图像话题名。 |
-| `imu_topic_name` | `"camera_imu"` | 同步 IMU 话题名，交给 CameraBase。 |
-| `realtime` | `true` | 按录制时间戳控制回放速度。 |
-| `loop` | `false` | 播放到末尾后重新开始。 |
+| `camera_name` | `"camera"` | 相机名，也是原始 IMU Topic 的前缀和 RamFS 命令文件名。 |
+| `image_topic_name` | `"camera_image"` | 图像 Topic 名称。 |
+| `imu_topic_name` | `"camera_imu"` | 传给 CameraBase 的同步 IMU Topic 名称。 |
+| `realtime` | `true` | 按录制时间戳限速回放。 |
+| `loop` | `false` | 到达文件末尾后从头开始。 |
 | `max_frames` | `0` | 最大提交帧数，`0` 表示不限制。 |
-| `trigger_period_us` | `10000` | 单档对应的图像触发周期，单位 us，必须非零。 |
-| `geometry` | 布局尺寸、ROI 0、2x2 下采样 | 帧坐标到原生传感器坐标的固定映射。 |
-| `replay_speed` | `1.0` | 回放倍率，必须是有限正数；`0.5` 为半速，`2.0` 为两倍速。 |
+| `trigger_period_us` | `10000` | 单档对应的图像触发周期，单位 us，非零。 |
+| `geometry` | 见下 | 帧坐标到原生传感器坐标的固定映射，复制到每一帧。 |
+| `replay_speed` | `1.0` | 回放倍率，有限正数；`0.5` 为半速，`2.0` 为两倍速。 |
 
-`RuntimeParam` 还保留一个不含 `trigger_period_us`（`geometry` 紧跟 `max_frames`）的构造函数，
-此时周期取 `10000`。
+`geometry` 的默认值取布局的宽、高和步长，ROI 偏移为 0，横纵下采样均为 2，`flags`、`reserved` 和采样相位为 0。构造时校验 geometry 的尺寸、步长、下采样、ROI 与原生标定范围；默认值对应 1440x1080 原生标定下的 720x540 布局。
 
-## 使用
+`RuntimeParam` 有三种构造方式：默认构造；按 `file_path_in, frame_csv_path_in, imu_csv_path_in, camera_name_in, image_topic_name_in, imu_topic_name_in, realtime_in, loop_in, max_frames_in, trigger_period_us_in, geometry_in, replay_speed_in` 顺序给出全部字段（`replay_speed_in` 默认 `1.0`）；以及省略 `trigger_period_us_in` 的同一顺序（`geometry_in` 紧跟 `max_frames_in`），此时触发周期取 `10000`。
 
-```sh
-xrobot module add QDU-Robomaster/CaptureFileCamera
-xrobot setup
-xrobot instance add QDU-Robomaster/CaptureFileCamera
-```
+Template parameter:
 
-`xrobot instance add` 在 `User/xrobot.yaml` 中写入一个实例，依赖项留空，默认值按源码写出；
-把 `ramfs` 填为 BSP 中用 `XR_REGISTER` 注册的 RamFS 对象名。帧布局用 constexpr 定义，必须与
-回放数据的图像尺寸一致；默认标定和几何对应 720x540，因此这里使用 720x540 布局：
+- `FrameLayoutV`: the frame layout `CameraTypes::FrameLayout`, tightly packed BGR8 (`step == width * 3`, checked at compile time), matching the image size of the replayed data.
+
+Dependency:
+
+- `ramfs`: `LibXR::RamFS` in which CameraBase registers the camera command file.
+
+Configuration parameters:
+
+- `calibration`: the `CameraCalibration` in the native sensor coordinate system, default `DefaultCalibration()`: 1440x1080, `fx ≈ fy ≈ 2328.7`, `PLUMB_BOB` distortion model, five distortion coefficients.
+- `runtime`: `RuntimeParam`, with the fields in the table below.
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `file_path` | `"capture_frames.bin"` | Path of the frame data bin; the video path when `frame_csv_path` is empty. |
+| `frame_csv_path` | `"capture_frames.csv"` | Path of the frame index CSV; an empty value selects video mode. |
+| `imu_csv_path` | `"capture_imu.csv"` | Path of the IMU CSV. |
+| `camera_name` | `"camera"` | Camera name, also the prefix of the raw IMU Topics and the name of the RamFS command file. |
+| `image_topic_name` | `"camera_image"` | Name of the image Topic. |
+| `imu_topic_name` | `"camera_imu"` | Name of the synchronized IMU Topic passed to CameraBase. |
+| `realtime` | `true` | Rate limit the replay by the recorded timestamps. |
+| `loop` | `false` | Restart from the beginning at the end of the file. |
+| `max_frames` | `0` | Maximum number of committed frames; `0` means unlimited. |
+| `trigger_period_us` | `10000` | Image trigger period of the single profile in us, non-zero. |
+| `geometry` | see below | Fixed mapping from frame coordinates to native sensor coordinates, copied to every frame. |
+| `replay_speed` | `1.0` | Replay speed factor, a finite positive number; `0.5` is half speed, `2.0` is double speed. |
+
+The default `geometry` takes the width, height and step of the layout, uses ROI offsets of 0 and a decimation of 2 in both directions, and sets `flags`, `reserved` and the sample phases to 0. At construction the size, step, decimation and ROI of the geometry are validated against the native calibration range; the default corresponds to a 720x540 layout under the 1440x1080 native calibration.
+
+`RuntimeParam` has three ways of construction: default construction; all fields in the order `file_path_in, frame_csv_path_in, imu_csv_path_in, camera_name_in, image_topic_name_in, imu_topic_name_in, realtime_in, loop_in, max_frames_in, trigger_period_us_in, geometry_in, replay_speed_in` (`replay_speed_in` defaults to `1.0`); and the same order without `trigger_period_us_in` (`geometry_in` directly follows `max_frames_in`), in which case the trigger period is `10000`.
+
+## 4. Topic
+
+| Topic | 方向 | 类型 | 说明 |
+| --- | --- | --- | --- |
+| `param.image_topic_name`（默认 `camera_image`） | 发布 | `const SharedFrame*`（CameraBase） | 每提交一帧图像发布一次，指针仅在同步回调期间有效 |
+| `<camera_name>_gyro` | 发布 | `Eigen::Matrix<float, 3, 1>` | 原始角速度，单位 rad/s，Topic timestamp 为 CSV 的 `timestamp_us` |
+| `<camera_name>_accl` | 发布 | `Eigen::Matrix<float, 3, 1>` | 原始线加速度，单位 m/s^2，Topic timestamp 为 CSV 的 `timestamp_us` |
+| `<camera_name>_quat` | 发布 | `LibXR::Quaternion<float>` | 原始姿态四元数，Topic timestamp 为 CSV 的 `timestamp_us` |
+
+原始 IMU Topic 位于默认 domain（`libxr_def_domain`）。CaptureFileCamera 发布原始 IMU。与 CameraFrameSync 配合时选择 `LATEST_IMU` 模式，并把 `host_topic_domain_name` 设为 `"libxr_def_domain"`。
+
+| Topic | Direction | Type | Meaning |
+| --- | --- | --- | --- |
+| `param.image_topic_name` (default `camera_image`) | Publish | `const SharedFrame*` (CameraBase) | Published once per committed image; the pointer is valid only during the synchronous callback |
+| `<camera_name>_gyro` | Publish | `Eigen::Matrix<float, 3, 1>` | Raw angular velocity in rad/s, Topic timestamp is the CSV `timestamp_us` |
+| `<camera_name>_accl` | Publish | `Eigen::Matrix<float, 3, 1>` | Raw linear acceleration in m/s^2, Topic timestamp is the CSV `timestamp_us` |
+| `<camera_name>_quat` | Publish | `LibXR::Quaternion<float>` | Raw attitude quaternion, Topic timestamp is the CSV `timestamp_us` |
+
+The raw IMU Topics are in the default domain (`libxr_def_domain`). CaptureFileCamera publishes the raw IMU. Together with CameraFrameSync, the `LATEST_IMU` mode is selected and `host_topic_domain_name` is set to `"libxr_def_domain"`.
+
+## 5. 配置示例 / Configuration Example
+
+`xrobot instance add QDU-Robomaster/CaptureFileCamera` 与 `xrobot sync` 写出的实例以 `DefaultCalibration()` 和 `DefaultRuntime()` 作为 `calibration` 与 `runtime` 的默认值。以下实例取自 `bsp-linux-autoaim-replay` 的配置，使用视频模式（`frame_csv_path_in` 为空），`MainFrameLayout`、`MainCameraCalibration` 与 `MainFrameGeometry` 在该配置的 `constexprs` 中定义，`ramfs` 为 BSP 中用 `XR_REGISTER`（硬件注册）注册的 `LibXR::RamFS` 对象名：
 
 ```yaml
-constexpr_includes:
-  - CameraBase.hpp
-constexprs:
-  FrameLayout:
-    type: CameraTypes::FrameLayout
-    value: '{.width = 720, .height = 540, .step = 2160, .encoding = CameraTypes::Encoding::BGR8}'
 modules:
   - module: QDU-Robomaster/CaptureFileCamera
-    id: capturefilecamera_0
+    id: camera
     template_args:
-      - ProjectConstexpr::FrameLayout
+      - AutoAimRunConfig::MainFrameLayout
     args:
       - ramfs: ramfs
-      - calibration: CaptureFileCamera<ProjectConstexpr::FrameLayout>::DefaultCalibration()
-      - runtime: CaptureFileCamera<ProjectConstexpr::FrameLayout>::DefaultRuntime()
+      - calibration: AutoAimRunConfig::MainCameraCalibration
+      - runtime:
+          file_path_in: "./data/camera_internal_recording_20260428/damo_clean.avi"
+          frame_csv_path_in: ""
+          imu_csv_path_in: "./data/camera_internal_recording_20260428/damo_imu.csv"
+          camera_name_in: "capturefile_camera"
+          image_topic_name_in: "capturefile_image"
+          imu_topic_name_in: "capturefile_imu"
+          realtime_in: true
+          loop_in: false
+          max_frames_in: 0
+          geometry_in: AutoAimRunConfig::MainFrameGeometry
+          replay_speed_in: 1.0
 ```
 
-默认路径是相对进程工作目录的 `capture_frames.bin`、`capture_frames.csv` 和
-`capture_imu.csv`。要指定文件，把 `runtime` 写成 YAML map。`RuntimeParam` 带构造函数，
-因此 map 的键必须按顺序写出某个构造函数的参数名（带 `_in` 后缀）；字符串写成 C++ 字符串
-字面量，`geometry_in` 可以引用另行定义的 `CameraTypes::FrameGeometry` 类型 constexpr，例如：
+`runtime` 写成 YAML 映射时，键为所选构造函数的参数名（带 `_in` 后缀），顺序与该构造函数一致；字符串写成带引号的 C++ 字符串字面量。使用 `frames.bin` 内录包时，`file_path_in` 指向 `*_frames.bin`，`frame_csv_path_in` 指向 `*_frames.csv`。后续的 CameraFrameSync 实例以 `camera: camera` 引用本实例，须列在本实例之后。
+
+The instance written by `xrobot instance add QDU-Robomaster/CaptureFileCamera` and `xrobot sync` uses `DefaultCalibration()` and `DefaultRuntime()` as the defaults of `calibration` and `runtime`. The following instance is taken from the configuration of `bsp-linux-autoaim-replay`. It uses video mode (`frame_csv_path_in` is empty); `MainFrameLayout`, `MainCameraCalibration` and `MainFrameGeometry` are defined in the `constexprs` of that configuration, and `ramfs` is the name of the `LibXR::RamFS` object registered in the BSP with `XR_REGISTER` (Registration):
 
 ```yaml
-runtime:
-  file_path_in: '"./data/record_frames.bin"'
-  frame_csv_path_in: '"./data/record_frames.csv"'
-  imu_csv_path_in: '"./data/record_imu.csv"'
-  camera_name_in: '"camera"'
-  image_topic_name_in: '"camera_image"'
-  imu_topic_name_in: '"camera_imu"'
-  realtime_in: true
-  loop_in: false
-  max_frames_in: 0
-  trigger_period_us_in: 10000
-  geometry_in: 'ProjectConstexpr::FrameGeometry'
-  replay_speed_in: 1.0
+modules:
+  - module: QDU-Robomaster/CaptureFileCamera
+    id: camera
+    template_args:
+      - AutoAimRunConfig::MainFrameLayout
+    args:
+      - ramfs: ramfs
+      - calibration: AutoAimRunConfig::MainCameraCalibration
+      - runtime:
+          file_path_in: "./data/camera_internal_recording_20260428/damo_clean.avi"
+          frame_csv_path_in: ""
+          imu_csv_path_in: "./data/camera_internal_recording_20260428/damo_imu.csv"
+          camera_name_in: "capturefile_camera"
+          image_topic_name_in: "capturefile_image"
+          imu_topic_name_in: "capturefile_imu"
+          realtime_in: true
+          loop_in: false
+          max_frames_in: 0
+          geometry_in: AutoAimRunConfig::MainFrameGeometry
+          replay_speed_in: 1.0
 ```
 
-BSP 侧：
+When `runtime` is written as a YAML mapping, the keys are the parameter names of the chosen constructor (with the `_in` suffix) in the order of that constructor, and strings are written as quoted C++ string literals. With a `frames.bin` recording, `file_path_in` points to `*_frames.bin` and `frame_csv_path_in` points to `*_frames.csv`. A following CameraFrameSync instance references this instance with `camera: camera` and is listed after it.
 
-```cpp
-XR_REGISTER(ramfs, LibXR::RamFS);
-```
+## 6. 依赖与硬件 / Dependencies and Hardware
 
-后续的 CameraFrameSync 实例用 `camera: capturefilecamera_0` 引用本实例，必须列在本实例之后。
+依赖：
 
-填好后再次运行 `xrobot setup`，生成 `User/xrobot_main.hpp`。
+- `QDU-Robomaster/CameraBase`：相机基类与共享图像槽。
+- `xrobot-org/DurationStatistics`：`OnMonitor()` 中的耗时统计。
+- OpenCV 4（`core`、`imgproc`、`imgcodecs`、`videoio`）与 Eigen。
+- LibXR。
 
-`xrobot module show .`（在本仓库中）或 `xrobot module show Modules/QDU-Robomaster/CaptureFileCamera`
-（在 BSP 中）打印当前的构造函数。
+硬件：本地文件系统上的内录包；`ramfs` 由 BSP 注册。
 
-## 测试
+Dependencies:
 
-在打开 `BUILD_TESTING` 的 BSP 构建中，本模块加入 `capture_file_camera_replay_pacing_test`
-（图像槽等待与停止）和 `capture_file_camera_runtime_param_compat_test`（`RuntimeParam`
-两种构造布局），用 `ctest` 运行。
+- `QDU-Robomaster/CameraBase`: camera base class and shared image slots.
+- `xrobot-org/DurationStatistics`: timing statistics in `OnMonitor()`.
+- OpenCV 4 (`core`, `imgproc`, `imgcodecs`, `videoio`) and Eigen.
+- LibXR.
 
-## 典型用途
-
-- 用统一 raw frame-bin 内录包复现实机输入。
-- 调试 `CameraFrameSync` 的图像和 IMU 对齐。
-- 在 CI 或本地回放固定数据，检查检测、跟踪、预览等模块是否还能稳定运行。
+Hardware: a recording on the local file system; `ramfs` is registered by the BSP.
