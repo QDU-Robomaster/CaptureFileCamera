@@ -43,56 +43,88 @@ depends:
 
 /**
  * @class CaptureFileCamera
- * @brief 文件相机源，用统一 raw frame-bin 内录包按 CameraBase 接口发布数据。
+ * @brief 文件回放相机：从内录包读取图像与 IMU 数据，按 CameraBase 接口发布。
+ *        File replay camera that reads images and IMU data from a recording and
+ *        publishes them through the CameraBase interface.
  *
- * 内录包为 `frames.bin + frames.csv + imu.csv`；`frame_csv_path` 为空时，
- * 按 `video + imu.csv` 回放。
+ * 内录包为 `frames.bin + frames.csv + imu.csv`；`frame_csv_path` 为空时，按
+ * `video + imu.csv` 回放。构造时加载并校验输入，随后启动后台回放线程；回放线程对每一帧
+ * 先发布一组原始 IMU，再提交对应的图像。
+ * A recording is `frames.bin + frames.csv + imu.csv`; with an empty `frame_csv_path` it
+ * is replayed as `video + imu.csv`. The construction loads and validates the input and
+ * then starts a background replay thread, which for every frame publishes one raw IMU
+ * group and then commits the matching image.
+ *
+ * @tparam FrameLayoutV 帧布局，紧密排列的 BGR8。
+ *                      Frame layout, tightly packed BGR8.
  */
 template <CameraTypes::FrameLayout FrameLayoutV>
 class CaptureFileCamera : public CameraBase<FrameLayoutV>
 {
  public:
-  using Self = CaptureFileCamera<FrameLayoutV>;  ///< 当前模板实例类型。
-  using Base = CameraBase<FrameLayoutV>;         ///< 图像发布基类。
-  using ImageFrame = typename Base::ImageFrame;  ///< CameraBase 图像帧类型。
-  using CameraCalibration = typename Base::CameraCalibration;  ///< 原生相机标定。
-  using FrameGeometry = typename Base::FrameGeometry;          ///< 固定回放采样几何。
-  using ProfileId = typename Base::ProfileId;                  ///< 固定档位标识。
-  using CameraProfile = typename Base::CameraProfile;          ///< 固定档位描述。
-  using AppliedProfile = typename Base::AppliedProfile;        ///< 已应用档位快照。
-  using ImuVector = Eigen::Matrix<float, 3, 1>;  ///< 原始 gyro/accl topic 的三轴数据。
-  using ImuSample = CaptureFileCameraDetail::ImuSample;      ///< CSV 中的一帧 IMU 数据。
-  using FrameRecord = CaptureFileCameraDetail::FrameRecord;  ///< 帧索引 CSV 中的一行。
-  using FrameBinReplayFrame =
-      CaptureFileCameraDetail::FrameBinReplayFrame;  ///< 已完成图像和 IMU 对齐的回放项。
-  using QuatSample = LibXR::Quaternion<float>;       ///< 原始 quat topic 的四元数数据。
+  /// 当前模板实例类型。
+  /// The current template instance type.
+  using Self = CaptureFileCamera<FrameLayoutV>;
+  /// 图像发布基类。
+  /// Image publishing base class.
+  using Base = CameraBase<FrameLayoutV>;
+  /// CameraBase 图像帧类型。
+  /// CameraBase image frame type.
+  using ImageFrame = typename Base::ImageFrame;
+  /// 原生相机标定。
+  /// Native camera calibration.
+  using CameraCalibration = typename Base::CameraCalibration;
+  /// 固定回放采样几何。
+  /// Fixed replay sampling geometry.
+  using FrameGeometry = typename Base::FrameGeometry;
+  /// 固定档位标识。
+  /// Fixed profile identifier.
+  using ProfileId = typename Base::ProfileId;
+  /// 固定档位描述。
+  /// Fixed profile description.
+  using CameraProfile = typename Base::CameraProfile;
+  /// 已应用档位快照。
+  /// Applied profile snapshot.
+  using AppliedProfile = typename Base::AppliedProfile;
+  /// 原始 gyro/accl Topic 的三轴数据。
+  /// Three-axis data of the raw gyro/accl Topics.
+  using ImuVector = Eigen::Matrix<float, 3, 1>;
+  /// CSV 中的一行 IMU 数据。
+  /// One IMU row of the CSV.
+  using ImuSample = CaptureFileCameraDetail::ImuSample;
+  /// 帧索引 CSV 中的一行。
+  /// One row of the frame index CSV.
+  using FrameRecord = CaptureFileCameraDetail::FrameRecord;
+  /// 已完成图像和 IMU 对齐的回放项。
+  /// Replay item with the image and IMU aligned.
+  using FrameBinReplayFrame = CaptureFileCameraDetail::FrameBinReplayFrame;
+  /// 原始 quat Topic 的四元数数据。
+  /// Quaternion data of the raw quat Topic.
+  using QuatSample = LibXR::Quaternion<float>;
 
-  /**
-   * @brief 编译期帧存储布局，来自 BSP YAML 预设。
-   */
+  /// 编译期帧存储布局，取自模板参数 `FrameLayoutV`。
+  /// Compile-time frame storage layout, taken from the template parameter
+  /// `FrameLayoutV`.
   static inline constexpr auto frame_layout = Base::frame_layout;
 
-  /**
-   * @brief BGR8 图像通道数。
-   */
+  /// BGR8 图像通道数。
+  /// Number of channels of a BGR8 image.
   static constexpr int channel_count = 3;
 
-  /**
-   * @brief 单行图像字节数。
-   */
+  /// 单行图像字节数。
+  /// Bytes per image row.
   static constexpr std::size_t frame_step = static_cast<std::size_t>(frame_layout.step);
 
-  /**
-   * @brief 图像宽度，单位像素。
-   */
+  /// 图像宽度，单位像素。
+  /// Image width in pixels.
   static constexpr int frame_width = static_cast<int>(frame_layout.width);
 
-  /**
-   * @brief 图像高度，单位像素。
-   */
+  /// 图像高度，单位像素。
+  /// Image height in pixels.
   static constexpr int frame_height = static_cast<int>(frame_layout.height);
 
-  /// 未给出触发周期时使用的默认周期，单位微秒。
+  /// 省略触发周期时采用的默认周期，单位微秒。
+  /// Default trigger period in microseconds, used when none is given.
   static constexpr uint32_t default_trigger_period_us = 10000U;
 
   static_assert(frame_layout.encoding == CameraTypes::Encoding::BGR8,
@@ -103,25 +135,31 @@ class CaptureFileCamera : public CameraBase<FrameLayoutV>
 
   /**
    * @struct RuntimeParam
-   * @brief xrobot YAML 传入的运行时参数。
+   * @brief 运行时参数：文件路径、Topic 名称和回放控制。
+   *        Runtime parameters: file paths, Topic names and replay control.
    */
   struct RuntimeParam
   {
-    std::string_view file_path = "capture_frames.bin";  ///< 帧数据 bin 路径。
-    std::string_view frame_csv_path =
-        "capture_frames.csv";  ///< 统一 raw frame-bin 包的帧索引 CSV。
-    std::string_view imu_csv_path =
-        "capture_imu.csv";  ///< 与 frames.csv 同步对齐的 IMU CSV。
-    std::string_view camera_name =
-        "camera";  ///< CameraBase 相机名，也是原始 IMU 话题前缀。
-    std::string_view image_topic_name =
-        "camera_image";  ///< 图像话题，供 CameraFrameSync 消费。
-    std::string_view imu_topic_name = "camera_imu";  ///< 同步后 IMU 话题名。
-    bool realtime = true;                            ///< 是否按录制帧间隔限速播放。
-    bool loop = false;                               ///< EOF 后是否回到第 0 帧继续播放。
-    uint32_t max_frames = 0;  ///< 0 表示不限帧数，测试可用环境变量覆盖。
-    uint32_t trigger_period_us =
-        default_trigger_period_us;  ///< 单档回放对应的图像触发周期。
+    std::string_view file_path = "capture_frames.bin";  ///< 帧数据 bin 或视频路径
+    ///< Frame data bin path or video path
+    std::string_view frame_csv_path = "capture_frames.csv";  ///< 帧索引 CSV，空为视频
+    ///< Frame index CSV path; empty selects video mode
+    std::string_view imu_csv_path = "capture_imu.csv";  ///< IMU CSV 路径
+    ///< Path of the IMU CSV
+    std::string_view camera_name = "camera";  ///< 相机名，兼作前缀与文件名
+    ///< Camera name, also the Topic prefix and the command file name
+    std::string_view image_topic_name = "camera_image";  ///< 图像 Topic 名称
+    ///< Name of the image Topic
+    std::string_view imu_topic_name = "camera_imu";  ///< 传给 CameraBase 的 IMU Topic
+    ///< Synchronized IMU Topic name passed to CameraBase
+    bool realtime = true;  ///< 按录制时间戳限速回放
+    ///< Rate limit the replay by the recorded timestamps
+    bool loop = false;  ///< 到达文件末尾后从头开始
+    ///< Restart from the beginning at the end of the file
+    uint32_t max_frames = 0;  ///< 最大提交帧数，0 表示不限制
+    ///< Maximum number of committed frames; 0 means unlimited
+    uint32_t trigger_period_us = default_trigger_period_us;  ///< 触发周期 (us)
+    ///< Image trigger period of the single profile (us), non-zero
     FrameGeometry geometry{
         frame_layout.width,
         frame_layout.height,
@@ -134,12 +172,46 @@ class CaptureFileCamera : public CameraBase<FrameLayoutV>
         0U,
         0.0F,
         0.0F,
-    };  ///< 整次回放固定复制到每帧的原生采样几何。
-    double replay_speed = 1.0;  ///< 有限正数倍率；仅改变播放节奏，不改变录制时间戳。
+    };  ///< 整次回放固定复制到每帧的原生采样几何
+    ///< Native sampling geometry copied to every frame for the whole replay
+    double replay_speed = 1.0;  ///< 回放倍率，有限正数，只改变播放节奏
+    ///< Replay speed factor, a finite positive number; only the replay pace changes
 
+    /**
+     * @brief 默认构造，所有字段取默认值。
+     *        Default construction with all fields at their defaults.
+     */
     RuntimeParam() = default;
 
-    /** 带显式触发周期的构造方式。 */
+    /**
+     * @brief 按字段顺序给出全部参数，含触发周期。
+     *        Construct from all fields in order, including the trigger period.
+     *
+     * @param file_path_in 帧数据 bin 路径或视频路径。
+     *                     Frame data bin path or video path.
+     * @param frame_csv_path_in 帧索引 CSV 路径。
+     *                          Frame index CSV path.
+     * @param imu_csv_path_in IMU CSV 路径。
+     *                        IMU CSV path.
+     * @param camera_name_in 相机名。
+     *                       Camera name.
+     * @param image_topic_name_in 图像 Topic 名称。
+     *                            Image Topic name.
+     * @param imu_topic_name_in 同步 IMU Topic 名称。
+     *                          Synchronized IMU Topic name.
+     * @param realtime_in 是否限速回放。
+     *                    Whether to rate limit the replay.
+     * @param loop_in 是否循环播放。
+     *                Whether to loop.
+     * @param max_frames_in 最大提交帧数，0 表示不限制。
+     *                      Maximum number of committed frames; 0 means unlimited.
+     * @param trigger_period_us_in 图像触发周期，单位微秒。
+     *                             Image trigger period in microseconds.
+     * @param geometry_in 固定采样几何。
+     *                    Fixed sampling geometry.
+     * @param replay_speed_in 回放倍率。
+     *                        Replay speed factor.
+     */
     constexpr RuntimeParam(std::string_view file_path_in,
                            std::string_view frame_csv_path_in,
                            std::string_view imu_csv_path_in,
@@ -164,7 +236,35 @@ class CaptureFileCamera : public CameraBase<FrameLayoutV>
     {
     }
 
-    /** 省略触发周期的构造方式，geometry 紧跟 max_frames。 */
+    /**
+     * @brief 省略触发周期，`geometry_in` 紧跟 `max_frames_in`，触发周期取
+     *        `default_trigger_period_us`。
+     *        Omit the trigger period: `geometry_in` directly follows `max_frames_in`
+     *        and the trigger period is `default_trigger_period_us`.
+     *
+     * @param file_path_in 帧数据 bin 路径或视频路径。
+     *                     Frame data bin path or video path.
+     * @param frame_csv_path_in 帧索引 CSV 路径。
+     *                          Frame index CSV path.
+     * @param imu_csv_path_in IMU CSV 路径。
+     *                        IMU CSV path.
+     * @param camera_name_in 相机名。
+     *                       Camera name.
+     * @param image_topic_name_in 图像 Topic 名称。
+     *                            Image Topic name.
+     * @param imu_topic_name_in 同步 IMU Topic 名称。
+     *                          Synchronized IMU Topic name.
+     * @param realtime_in 是否限速回放。
+     *                    Whether to rate limit the replay.
+     * @param loop_in 是否循环播放。
+     *                Whether to loop.
+     * @param max_frames_in 最大提交帧数，0 表示不限制。
+     *                      Maximum number of committed frames; 0 means unlimited.
+     * @param geometry_in 固定采样几何。
+     *                    Fixed sampling geometry.
+     * @param replay_speed_in 回放倍率。
+     *                        Replay speed factor.
+     */
     constexpr RuntimeParam(std::string_view file_path_in,
                            std::string_view frame_csv_path_in,
                            std::string_view imu_csv_path_in,
@@ -181,10 +281,42 @@ class CaptureFileCamera : public CameraBase<FrameLayoutV>
     }
   };
 
+  /**
+   * @brief 返回默认的原生相机标定：1440x1080，PLUMB_BOB 畸变模型。
+   *        Return the default native camera calibration: 1440x1080, PLUMB_BOB
+   *        distortion model.
+   *
+   * @return 默认标定。
+   *         The default calibration.
+   */
   static CameraCalibration DefaultCalibration() { return {.native_width = 1440, .native_height = 1080, .camera_matrix = {2328.685719898089, 0.0, 733.3564625092474, 0.0, 2328.670107789996, 540.6187286922773, 0.0, 0.0, 1.0}, .distortion_model = CameraTypes::DistortionModel::PLUMB_BOB, .distortion_coefficients = {-0.09182103918709904, 0.4639907346830205, 0.002609878642637282, 0.0009819586010405485, -0.4751278850310457}, .rectification_matrix = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0}, .projection_matrix = {2328.685719898089, 0.0, 733.3564625092474, 0.0, 0.0, 2328.670107789996, 540.6187286922773, 0.0, 0.0, 0.0, 1.0, 0.0}}; }
 
+  /**
+   * @brief 返回默认运行时参数。
+   *        Return the default runtime parameters.
+   *
+   * @return 全部字段取默认值的 `RuntimeParam`。
+   *         A `RuntimeParam` with all fields at their defaults.
+   */
   static RuntimeParam DefaultRuntime() { return {}; }
 
+  /**
+   * @brief 构造文件相机，加载并校验内录包后启动后台回放线程。
+   *        Construct the file camera, load and validate the recording, and start the
+   *        background replay thread.
+   *
+   * 几何、触发周期、回放倍率、CSV 与图像数据任一校验失败时抛出
+   * `std::runtime_error`。
+   * A `std::runtime_error` is thrown when the geometry, trigger period,
+   * replay speed, CSVs or image data fail validation.
+   *
+   * @param ramfs CameraBase 注册相机命令文件的 RamFS。
+   *              RamFS in which CameraBase registers the camera command file.
+   * @param calibration 原生传感器坐标系下的相机标定。
+   *                    Camera calibration in the native sensor coordinate system.
+   * @param runtime 文件路径、Topic 名称和回放控制参数。
+   *                File paths, Topic names and replay control parameters.
+   */
   explicit CaptureFileCamera(
       LibXR::RamFS& ramfs,
       CameraCalibration calibration = DefaultCalibration(),
@@ -238,11 +370,30 @@ class CaptureFileCamera : public CameraBase<FrameLayoutV>
     capture_thread_ = std::thread(CaptureThreadMain, this);
   }
 
+  /**
+   * @brief 返回固定档位列表，仅含 `WIDE` 一档。
+   *        Return the fixed profile list, which holds the single profile `WIDE`.
+   *
+   * @return 档位描述。
+   *         Profile descriptions.
+   */
   [[nodiscard]] std::span<const CameraProfile> Profiles() const noexcept override
   {
     return profiles_;
   }
 
+  /**
+   * @brief 应用档位：`WIDE` 返回其 geometry，其他档位返回 `NOT_SUPPORT`。
+   *        Apply a profile: `WIDE` returns its per-frame geometry and any other profile
+   *        returns `NOT_SUPPORT`.
+   *
+   * @param id 档位标识。
+   *           Profile identifier.
+   * @param applied 生效的档位快照。
+   *                Applied profile snapshot.
+   * @return `OK` 或 `NOT_SUPPORT`。
+   *         `OK` or `NOT_SUPPORT`.
+   */
   LibXR::ErrorCode SwitchProfile(ProfileId id, AppliedProfile& applied) override
   {
     if (id != profiles_[0].id)
@@ -254,7 +405,8 @@ class CaptureFileCamera : public CameraBase<FrameLayoutV>
   }
 
   /**
-   * @brief 通知采集线程在下一轮循环退出。
+   * @brief 通知回放线程在下一轮循环退出并等待其结束。
+   *        Ask the replay thread to exit at its next iteration and wait for it.
    */
   ~CaptureFileCamera() override
   {
@@ -266,7 +418,11 @@ class CaptureFileCamera : public CameraBase<FrameLayoutV>
   }
 
   /**
-   * @brief 周期性输出回放状态。
+   * @brief 输出回放状态：累计提交帧数、已发布 IMU 组数、运行状态、本周期提交帧数，
+   *        以及各阶段耗时统计（单位微秒）。
+   *        Print the replay status: total committed frames, published IMU groups, running
+   *        state, frames committed in the period, and per-stage timing statistics
+   *        (in microseconds).
    */
   void OnMonitor()
   {
@@ -317,12 +473,16 @@ class CaptureFileCamera : public CameraBase<FrameLayoutV>
   }
 
   /**
-   * @brief 文件相机不支持曝光控制，此接口用于满足 CameraBase 合约。
+   * @brief 空实现，满足 CameraBase 接口；传入的曝光值被忽略。
+   *        Empty implementation that satisfies the CameraBase interface; the given
+   *        exposure value is ignored.
    */
   void SetExposure(double) override {}
 
   /**
-   * @brief 文件相机不支持增益控制，此接口用于满足 CameraBase 合约。
+   * @brief 空实现，满足 CameraBase 接口；传入的增益值被忽略。
+   *        Empty implementation that satisfies the CameraBase interface; the given
+   *        gain value is ignored.
    */
   void SetGain(double) override {}
 
