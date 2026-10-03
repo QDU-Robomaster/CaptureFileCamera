@@ -161,18 +161,17 @@ class CaptureFileCamera : public CameraBase<FrameLayoutV>
     uint32_t trigger_period_us = default_trigger_period_us;  ///< 触发周期 (us)
     ///< Image trigger period of the single profile (us), non-zero
     FrameGeometry geometry{
-        frame_layout.width,
-        frame_layout.height,
-        frame_layout.step,
-        0U,
-        0U,
-        2U,
-        2U,
-        CameraTypes::FRAME_GEOMETRY_NONE,
-        0U,
-        0.0F,
-        0.0F,
-    };  ///< 整次回放固定复制到每帧的原生采样几何
+        .width = frame_layout.width,
+        .height = frame_layout.height,
+        .step = frame_layout.step,
+        .roi_offset_x_native = 0U,
+        .roi_offset_y_native = 0U,
+        .decimation_x = 2U,
+        .decimation_y = 2U,
+        .flags = CameraTypes::FRAME_GEOMETRY_NONE,
+        .reserved = 0U,
+        .sample_phase_x_native = 0.0F,
+        .sample_phase_y_native = 0.0F};  ///< 整次回放固定复制到每帧的原生采样几何
     ///< Native sampling geometry copied to every frame for the whole replay
     double replay_speed = 1.0;  ///< 回放倍率，有限正数，只改变播放节奏
     ///< Replay speed factor, a finite positive number; only the replay pace changes
@@ -289,7 +288,21 @@ class CaptureFileCamera : public CameraBase<FrameLayoutV>
    * @return 默认标定。
    *         The default calibration.
    */
-  static CameraCalibration DefaultCalibration() { return {.native_width = 1440, .native_height = 1080, .camera_matrix = {2328.685719898089, 0.0, 733.3564625092474, 0.0, 2328.670107789996, 540.6187286922773, 0.0, 0.0, 1.0}, .distortion_model = CameraTypes::DistortionModel::PLUMB_BOB, .distortion_coefficients = {-0.09182103918709904, 0.4639907346830205, 0.002609878642637282, 0.0009819586010405485, -0.4751278850310457}, .rectification_matrix = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0}, .projection_matrix = {2328.685719898089, 0.0, 733.3564625092474, 0.0, 0.0, 2328.670107789996, 540.6187286922773, 0.0, 0.0, 0.0, 1.0, 0.0}}; }
+  static CameraCalibration DefaultCalibration()
+  {
+    return {.native_width = 1440,
+            .native_height = 1080,
+            .camera_matrix = {2328.685719898089, 0.0, 733.3564625092474, 0.0,
+                              2328.670107789996, 540.6187286922773, 0.0, 0.0, 1.0},
+            .distortion_model = CameraTypes::DistortionModel::PLUMB_BOB,
+            .distortion_coefficients = {-0.09182103918709904, 0.4639907346830205,
+                                        0.002609878642637282, 0.0009819586010405485,
+                                        -0.4751278850310457},
+            .rectification_matrix = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0},
+            .projection_matrix = {2328.685719898089, 0.0, 733.3564625092474, 0.0, 0.0,
+                                  2328.670107789996, 540.6187286922773, 0.0, 0.0, 0.0,
+                                  1.0, 0.0}};
+  }
 
   /**
    * @brief 返回默认运行时参数。
