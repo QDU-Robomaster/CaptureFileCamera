@@ -140,7 +140,7 @@ explicit CaptureFileCamera(
 
 `geometry` 的默认值取布局的宽、高和步长，ROI 偏移为 0，横纵下采样均为 2，`flags`、`reserved` 和采样相位为 0。构造时校验 geometry 的尺寸、步长、下采样、ROI 与原生标定范围；默认值对应 1440x1080 原生标定下的 720x540 布局。
 
-`RuntimeParam` 有三种构造方式：默认构造；按 `file_path_in, frame_csv_path_in, imu_csv_path_in, camera_name_in, image_topic_name_in, imu_topic_name_in, realtime_in, loop_in, max_frames_in, trigger_period_us_in, geometry_in, replay_speed_in` 顺序给出全部字段（`replay_speed_in` 默认 `1.0`）；以及省略 `trigger_period_us_in` 的同一顺序（`geometry_in` 紧跟 `max_frames_in`），此时触发周期取 `10000`。
+`RuntimeParam` 可以默认构造，也可以按 `file_path_in, frame_csv_path_in, imu_csv_path_in, camera_name_in, image_topic_name_in, imu_topic_name_in, realtime_in, loop_in, max_frames_in, trigger_period_us_in, geometry_in, replay_speed_in` 的顺序给出全部字段构造（`replay_speed_in` 默认 `1.0`）。
 
 Template parameter:
 
@@ -172,7 +172,7 @@ Configuration parameters:
 
 The default `geometry` takes the width, height and step of the layout, uses ROI offsets of 0 and a decimation of 2 in both directions, and sets `flags`, `reserved` and the sample phases to 0. At construction the size, step, decimation and ROI of the geometry are validated against the native calibration range; the default corresponds to a 720x540 layout under the 1440x1080 native calibration.
 
-`RuntimeParam` has three ways of construction: default construction; all fields in the order `file_path_in, frame_csv_path_in, imu_csv_path_in, camera_name_in, image_topic_name_in, imu_topic_name_in, realtime_in, loop_in, max_frames_in, trigger_period_us_in, geometry_in, replay_speed_in` (`replay_speed_in` defaults to `1.0`); and the same order without `trigger_period_us_in` (`geometry_in` directly follows `max_frames_in`), in which case the trigger period is `10000`.
+`RuntimeParam` can be default-constructed or constructed from all fields in the order `file_path_in, frame_csv_path_in, imu_csv_path_in, camera_name_in, image_topic_name_in, imu_topic_name_in, realtime_in, loop_in, max_frames_in, trigger_period_us_in, geometry_in, replay_speed_in` (`replay_speed_in` defaults to `1.0`).
 
 ## 4. Topic
 
@@ -210,11 +210,11 @@ modules:
       - runtime: CaptureFileCamera<CameraTypes::FrameLayout{.width=720,.height=540,.step=2160,.encoding=CameraTypes::Encoding::BGR8}>::DefaultRuntime()
 ```
 
-`runtime` 写成 YAML 映射时，键为所选构造函数的参数名（带 `_in` 后缀），顺序与该构造函数一致；字符串写成带引号的 C++ 字符串字面量。使用 `frames.bin` 内录包时，`file_path_in` 指向 `*_frames.bin`，`frame_csv_path_in` 指向 `*_frames.csv`。后续的 CameraFrameSync 实例以 `camera: camera` 引用本实例，须列在本实例之后。
+`runtime` 写成 YAML 映射时，键为上述构造函数的参数名（带 `_in` 后缀），顺序与之一致；字符串写成带引号的 C++ 字符串字面量。使用 `frames.bin` 内录包时，`file_path_in` 指向 `*_frames.bin`，`frame_csv_path_in` 指向 `*_frames.csv`。后续的 CameraFrameSync 实例以 `camera: camera` 引用本实例，须列在本实例之后。
 
 The instance written by `xrobot instance add QDU-Robomaster/CaptureFileCamera --template-arg <FrameLayout>`, where `calibration` and `runtime` are the C++ expressions `DefaultCalibration()` and `DefaultRuntime()` written by the tool, and `ramfs` is the name of the `LibXR::RamFS` object registered in the BSP with `XR_REGISTER` (Registration). `template_args` takes a 720x540 BGR8 layout, which matches the 1440x1080 native range of the default calibration and the decimation of 2 of the default `geometry`; the replay file paths, Topic names and replay control take the defaults in the table of section 3.
 
-When `runtime` is written as a YAML mapping, the keys are the parameter names of the chosen constructor (with the `_in` suffix) in the order of that constructor, and strings are written as quoted C++ string literals. With a `frames.bin` recording, `file_path_in` points to `*_frames.bin` and `frame_csv_path_in` points to `*_frames.csv`. A following CameraFrameSync instance references this instance with `camera: camera` and is listed after it.
+When `runtime` is written as a YAML mapping, the keys are the parameter names of the constructor above (with the `_in` suffix) in the same order, and strings are written as quoted C++ string literals. With a `frames.bin` recording, `file_path_in` points to `*_frames.bin` and `frame_csv_path_in` points to `*_frames.csv`. A following CameraFrameSync instance references this instance with `camera: camera` and is listed after it.
 
 ## 6. 依赖与硬件 / Dependencies and Hardware
 
