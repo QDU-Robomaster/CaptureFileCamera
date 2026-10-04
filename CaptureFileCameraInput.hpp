@@ -14,7 +14,7 @@
 
 namespace CaptureFileCameraDetail
 {
-/// 默认 100 Hz 回放周期；仅在 CSV 相邻时间戳或视频 FPS 不可用时兜底。
+/// 默认 100 Hz 回放周期，用于 CSV 相邻时间戳或视频 FPS 不可用的场合。
 static constexpr uint64_t default_period_us = 10000;
 static constexpr double microseconds_per_second = 1000000.0;
 static constexpr uint64_t microseconds_per_millisecond = 1000;
@@ -110,7 +110,7 @@ struct FrameBinReplayFrame
   ImuSample imu{};      ///< 与该图像 timestamp 对齐的 IMU。
 };
 
-/// 视频几何信息和回放限速兜底周期。
+/// 视频几何信息和回放限速的备用周期。
 struct VideoInfo
 {
   int width{};   ///< 视频宽度，单位像素。
