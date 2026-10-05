@@ -7,8 +7,6 @@ jobs:
   build:
     uses: xrobot-org/XRobot/.github/workflows/module-ci.yml@v1
     with:
-      template-args: '["CameraTypes::FrameLayout{.width=640,.height=480,.step=1920,.encoding=CameraTypes::Encoding::BGR8}"]'
-      image: 'ghcr.io/xrobot-org/docker-image-webots:main'
+      template-args: '[]'
       apt-packages: 'libopencv-dev'
-      cmake-options: '-DOpenCV_DIR=/usr/lib/x86_64-linux-gnu/cmake/opencv4 -DWEBOTS_HOME=/usr/local/webots'
-      ctest-regex: '^capture_file_camera_'
+      ctest-regex: '^capture_file_.*_test$'
