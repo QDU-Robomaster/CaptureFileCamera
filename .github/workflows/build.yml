@@ -8,5 +8,5 @@ jobs:
     uses: xrobot-org/XRobot/.github/workflows/module-ci.yml@v1
     with:
       template-args: '[]'
-      apt-packages: 'libopencv-dev'
+      apt-packages: 'libopencv-dev libeigen3-dev'
       ctest-regex: '^capture_file_.*_test$'

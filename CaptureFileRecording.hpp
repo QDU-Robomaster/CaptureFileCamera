@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "AutoAimTypes.hpp"
 #include "CameraTypes.hpp"
 
 /**
@@ -23,14 +24,6 @@
  */
 namespace CaptureFileRecording
 {
-/// 录像里与一帧同步的 IMU / IMU recorded with one frame.
-struct RecordedImu
-{
-  std::array<float, 4> rotation_wxyz;
-  std::array<float, 3> angular_velocity_xyz;
-  std::array<float, 3> linear_acceleration_xyz;
-};
-
 /// frames.csv 的一行 / One row of frames.csv.
 struct Row
 {
@@ -38,7 +31,7 @@ struct Row
   uint64_t timestamp_us;
   uint32_t frame_counter;
   CameraTypes::FrameGeometry geometry;
-  std::optional<RecordedImu> imu;
+  std::optional<AutoAim::ImuSample> imu;  ///< 时间戳同 timestamp_us / Same timestamp
 };
 
 inline std::string PgmPath(const std::string& dir, uint64_t frame)
@@ -172,8 +165,10 @@ inline bool LoadFrames(const std::string& dir, std::vector<Row>& rows, std::stri
       {
         ok = Detail::ParseFloat(fields[imu[i]], v[i]);
       }
-      row.imu =
-          RecordedImu{{v[0], v[1], v[2], v[3]}, {v[4], v[5], v[6]}, {v[7], v[8], v[9]}};
+      row.imu = AutoAim::ImuSample{LibXR::MicrosecondTimestamp(row.timestamp_us),
+                                   {v[0], v[1], v[2], v[3]},
+                                   {v[4], v[5], v[6]},
+                                   {v[7], v[8], v[9]}};
     }
     if (!ok)
     {

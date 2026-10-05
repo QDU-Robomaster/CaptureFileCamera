@@ -63,49 +63,56 @@ std::string WriteRecording(const char* name, int frames, bool with_imu)
   return dir.string();
 }
 
-/// 按到达顺序记录 IMU 与图像 / Records IMU and images in arrival order.
+/// 按到达顺序记录图像与同步帧 / Records images and synced frames in arrival order.
 struct Events
 {
   struct Event
   {
-    char kind;  // 'g' gyro, 'a' accl, 'i' image
+    char kind;  // 'i' image, 's' synced
     uint64_t timestamp_us;
-    float value;  // gyro x / accl z / first pixel byte
+    const ImageFrame* image;
+    float first_pixel;
     CameraTypes::FrameGeometry geometry;
     uint32_t counter;
+    uint64_t sequence;
+    AutoAim::ImuSample imu;
   };
 
   std::mutex mutex;
   std::vector<Event> events;
-  std::atomic<int> images{0};
+  std::atomic<int> synced{0};
 
-  Events(const std::string& camera, const std::string& gyro, const std::string& accl)
+  explicit Events(const std::string& camera)
   {
-    auto on_gyro = LibXR::Topic::Callback::Create(
-        [](bool, Events* self, LibXR::MicrosecondTimestamp t,
-           CaptureFileCamera::ImuVector& v)
-        { self->Add({'g', static_cast<uint64_t>(t), v.x(), {}, 0}); },
-        this);
-    auto on_accl = LibXR::Topic::Callback::Create(
-        [](bool, Events* self, LibXR::MicrosecondTimestamp t,
-           CaptureFileCamera::ImuVector& v)
-        { self->Add({'a', static_cast<uint64_t>(t), v.z(), {}, 0}); },
-        this);
     auto on_image = LibXR::Topic::Callback::Create(
         [](bool, Events* self, ImageTopicPayload payload)
         {
           const ImageFrame& f = **payload;
-          self->Add({'i', static_cast<uint64_t>(f.timestamp_us),
-                     static_cast<float>(f.data[0]), f.geometry, f.frame_counter});
-          self->images.fetch_add(1);
+          self->Add({'i',
+                     static_cast<uint64_t>(f.timestamp_us),
+                     &f,
+                     static_cast<float>(f.data[0]),
+                     f.geometry,
+                     f.frame_counter,
+                     0,
+                     {}});
         },
         this);
-    LibXR::Topic::CreateTopic<CaptureFileCamera::ImuVector>(gyro.c_str())
-        .RegisterCallback(on_gyro);
-    LibXR::Topic::CreateTopic<CaptureFileCamera::ImuVector>(accl.c_str())
-        .RegisterCallback(on_accl);
+    auto on_synced = LibXR::Topic::Callback::Create(
+        [](bool, Events* self, const AutoAim::SyncedFrame* s)
+        {
+          const ImageFrame& f = *s->image;
+          self->Add({'s', static_cast<uint64_t>(f.timestamp_us), &f,
+                     static_cast<float>(f.data[0]), f.geometry, f.frame_counter,
+                     s->sequence, s->imu});
+          self->synced.fetch_add(1);
+        },
+        this);
     LibXR::Topic::CreateTopic<ImageTopicPayload>(StageTopicName(camera, "image").c_str())
         .RegisterCallback(on_image);
+    LibXR::Topic::CreateTopic<const AutoAim::SyncedFrame*>(
+        StageTopicName(camera, AutoAim::STAGE_SYNCED).c_str())
+        .RegisterCallback(on_synced);
   }
 
   void Add(const Event& e)
@@ -114,24 +121,24 @@ struct Events
     events.push_back(e);
   }
 
-  std::vector<Event> Images()
+  std::vector<Event> Synced()
   {
     std::lock_guard<std::mutex> lock(mutex);
     std::vector<Event> out;
     for (const Event& e : events)
     {
-      if (e.kind == 'i') out.push_back(e);
+      if (e.kind == 's') out.push_back(e);
     }
     return out;
   }
 
-  bool WaitImages(int count, int timeout_ms = 3000)
+  bool WaitSynced(int count, int timeout_ms = 3000)
   {
-    for (int t = 0; t < timeout_ms && images.load() < count; ++t)
+    for (int t = 0; t < timeout_ms && synced.load() < count; ++t)
     {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    return images.load() >= count;
+    return synced.load() >= count;
   }
 };
 
@@ -139,33 +146,31 @@ struct Events
 /// 创建且不释放。
 /// Create the Topics and subscribe before the camera so every frame arrives. LibXR
 /// callbacks cannot be unregistered, so subscribers live on the heap forever.
-Events& Subscribe(const char* camera, const char* gyro, const char* accl)
-{
-  return *new Events(camera, gyro, accl);
-}
+Events& Subscribe(const char* camera) { return *new Events(camera); }
 
-void TestOrderAndGeometry()
+void TestOrderAndContent()
 {
   const std::string dir = WriteRecording("cfc_camera_order", 3, true);
-  Events& events = Subscribe("order", "order_gyro", "order_accl");
-  CaptureFileCamera camera(
-      CALIBRATION, "order",
-      {dir, "order_gyro", "order_accl", "order_quat", 0.0, false, 0});
-  Expect(events.WaitImages(3), "all frames replayed");
+  Events& events = Subscribe("order");
+  CaptureFileCamera camera(CALIBRATION, "order", {dir, 0.0, false, 0});
+  Expect(events.WaitSynced(3), "all frames replayed");
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
   std::lock_guard<std::mutex> lock(events.mutex);
-  Expect(events.events.size() == 9, "gyro, accl and image for each of 3 frames");
+  Expect(events.events.size() == 6, "image and synced frame for each of 3 frames");
   for (int n = 0; n < 3; ++n)
   {
-    const Events::Event& gyro = events.events[3 * n];
-    const Events::Event& accl = events.events[3 * n + 1];
-    const Events::Event& image = events.events[3 * n + 2];
-    Expect(gyro.kind == 'g' && accl.kind == 'a' && image.kind == 'i',
-           "IMU precedes image");
+    const Events::Event& image = events.events[2 * n];
+    const Events::Event& synced = events.events[2 * n + 1];
+    Expect(image.kind == 'i' && synced.kind == 's', "image precedes its synced frame");
+    Expect(synced.image == image.image, "synced frame holds the published image");
     const uint64_t t = static_cast<uint64_t>(1000 + 20000 * n);
-    Expect(gyro.timestamp_us == t && image.timestamp_us == t, "recorded timestamps");
-    Expect(gyro.value == static_cast<float>(n) && accl.value == 9.8F, "recorded IMU");
-    Expect(image.value == static_cast<float>(n), "pixels of frame n");
+    Expect(image.timestamp_us == t, "recorded timestamp");
+    Expect(static_cast<uint64_t>(synced.imu.timestamp_us) == t, "IMU carries image time");
+    Expect(synced.imu.angular_velocity_xyz[0] == static_cast<float>(n) &&
+               synced.imu.linear_acceleration_xyz[2] == 9.8F,
+           "recorded IMU");
+    Expect(synced.sequence == static_cast<uint64_t>(n + 1), "sequence increases");
+    Expect(image.first_pixel == static_cast<float>(n), "pixels of frame n");
     Expect(image.counter == static_cast<uint32_t>(10 + n), "frame counter");
     const CameraTypes::FrameGeometry expected =
         n % 2 == 1 ? CameraTypes::FrameGeometry{400, 284, 1} : CameraBase::WIDE_GEOMETRY;
@@ -176,35 +181,33 @@ void TestOrderAndGeometry()
 void TestLoopAndMaxFrames()
 {
   const std::string dir = WriteRecording("cfc_camera_loop", 3, false);
-  Events& events = Subscribe("loop", "loop_gyro", "loop_accl");
-  CaptureFileCamera camera(CALIBRATION, "loop",
-                           {dir, "loop_gyro", "loop_accl", "loop_quat", 0.0, true, 7});
-  Expect(events.WaitImages(7), "seven frames over three passes");
+  Events& events = Subscribe("loop");
+  CaptureFileCamera camera(CALIBRATION, "loop", {dir, 0.0, true, 7});
+  Expect(events.WaitSynced(7), "seven frames over three passes");
   std::this_thread::sleep_for(std::chrono::milliseconds(200));
-  const auto images = events.Images();
-  Expect(images.size() == 7, "max_frames stops the replay");
-  for (std::size_t i = 1; i < images.size(); ++i)
+  const auto synced = events.Synced();
+  Expect(synced.size() == 7, "max_frames stops the replay");
+  for (std::size_t i = 1; i < synced.size(); ++i)
   {
-    Expect(images[i].timestamp_us > images[i - 1].timestamp_us,
+    Expect(synced[i].timestamp_us > synced[i - 1].timestamp_us,
            "loop keeps time increasing");
   }
   // 一轮 = 首尾 40 ms + 平均间隔 20 ms / One pass = 40 ms first-to-last + 20 ms period.
-  Expect(images[3].timestamp_us == images[0].timestamp_us + 60000, "pass length");
-  std::lock_guard<std::mutex> lock(events.mutex);
-  for (const Events::Event& e : events.events)
+  Expect(synced[3].timestamp_us == synced[0].timestamp_us + 60000, "pass length");
+  for (const Events::Event& e : synced)
   {
-    if (e.kind == 'a') Expect(e.value == 9.80665F, "resting accl without recorded IMU");
+    Expect(e.imu.rotation_wxyz[0] == 1.0F && e.imu.linear_acceleration_xyz[2] == 9.80665F,
+           "resting attitude without recorded IMU");
   }
 }
 
 void TestPacing()
 {
   const std::string dir = WriteRecording("cfc_camera_pace", 4, true);
-  Events& events = Subscribe("pace", "pace_gyro", "pace_accl");
+  Events& events = Subscribe("pace");
   const auto start = std::chrono::steady_clock::now();
-  CaptureFileCamera camera(CALIBRATION, "pace",
-                           {dir, "pace_gyro", "pace_accl", "pace_quat", 1.0, false, 0});
-  Expect(events.WaitImages(4), "paced frames arrive");
+  CaptureFileCamera camera(CALIBRATION, "pace", {dir, 1.0, false, 0});
+  Expect(events.WaitSynced(4), "paced frames arrive");
   const double ms =
       std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
           .count();
@@ -216,7 +219,7 @@ void TestPacing()
 int main()
 {
   LibXR::PlatformInit();
-  TestOrderAndGeometry();
+  TestOrderAndContent();
   TestLoopAndMaxFrames();
   TestPacing();
   std::puts("capture_file_camera_test passed");

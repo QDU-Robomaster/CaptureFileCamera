@@ -2,14 +2,15 @@
 
 // clang-format off
 /* === MODULE MANIFEST V2 ===
-module_description: 回放相机：按录制时间回放统一录像，并在 MCU 的 IMU Topic 上发布录制的 IMU / Replay camera that plays a unified recording at its recorded pace and publishes the recorded IMU on the MCU IMU Topics
+module_description: 回放相机：按录制时间回放统一录像，直接发布图像与同步帧 / Replay camera that plays a unified recording at its recorded pace and publishes the images and the synced frames directly
 depends:
 - id: QDU-Robomaster/CameraBase
+  ref: same-or-dev
+- id: QDU-Robomaster/AutoAimTypes
   ref: same-or-dev
 === END MANIFEST === */
 // clang-format on
 
-#include <Eigen/Core>
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -19,32 +20,31 @@ depends:
 #include <thread>
 #include <vector>
 
+#include "AutoAimTypes.hpp"
 #include "CameraBase.hpp"
 #include "CaptureFileRecording.hpp"
 #include "libxr_def.hpp"
 #include "logger.hpp"
 #include "message.hpp"
-#include "transform.hpp"
 
 /// 回放设置，与 YAML 一一对应 / Replay settings, one-to-one with the YAML.
 struct ReplaySettings
 {
   std::string_view recording_dir;
-  std::string_view gyro_topic;  ///< 与 CameraFrameSync 配置的 IMU Topic 名相同
-  std::string_view accl_topic;  ///< Same IMU Topic names as configured in CameraFrameSync
-  std::string_view quat_topic;
   double speed;  ///< 1.0 为录制速度，0 为不限速 / 1.0 = recorded pace, 0 = no pacing
   bool loop;     ///< 播完从头开始 / Restart at the end
   uint32_t max_frames;  ///< 0 为不限 / 0 = unlimited
 };
 
 /**
- * @brief 回放相机。构造时读完并检查整个录像；每帧先在三个 IMU Topic 上发布录制的
- *        IMU（录像没有 IMU 时发静止姿态），再发布图像。几何取自录像。
- *        Replay camera. The whole recording is read and checked at construction. For
- *        every frame the recorded IMU (a resting attitude when the recording has none)
- *        is published on the three IMU Topics before the image. The geometry comes
- *        from the recording.
+ * @brief 回放相机。构造时读完并检查整个录像；每帧发布图像 `<name>_image`，再用同一张图
+ *        和录制的 IMU 发布同步帧 `<name>_synced`（录像没有 IMU 时用静止姿态）。几何取自
+ *        录像。回放配置里没有 CameraFrameSync。
+ *        Replay camera. The whole recording is read and checked at construction. Each
+ *        frame publishes the image `<name>_image` and then the synced frame
+ *        `<name>_synced` from the same image and the recorded IMU (a resting attitude
+ *        when the recording has none). The geometry comes from the recording. Replay
+ *        configurations have no CameraFrameSync.
  *
  * 没有空图像槽时等待，回放不丢帧。循环播放时时间戳逐轮平移，保持递增。
  * With no free slot it waits, so replay drops no frames. When looping, timestamps are
@@ -53,9 +53,6 @@ struct ReplaySettings
 class CaptureFileCamera : public CameraBase
 {
  public:
-  using ImuVector = Eigen::Matrix<float, 3, 1>;
-  using ImuQuaternion = LibXR::Quaternion<float>;
-
   CaptureFileCamera(const CameraTypes::CameraCalibration& calibration,
                     std::string_view name, const ReplaySettings& settings)
       : CameraBase(calibration, {0.5, 0.5}, name, SlotPolicy::WAIT),
@@ -63,12 +60,8 @@ class CaptureFileCamera : public CameraBase
         speed_(settings.speed),
         loop_(settings.loop),
         max_frames_(settings.max_frames),
-        gyro_topic_(LibXR::Topic::CreateTopic<ImuVector>(
-            std::string(settings.gyro_topic).c_str())),
-        accl_topic_(LibXR::Topic::CreateTopic<ImuVector>(
-            std::string(settings.accl_topic).c_str())),
-        quat_topic_(LibXR::Topic::CreateTopic<ImuQuaternion>(
-            std::string(settings.quat_topic).c_str()))
+        synced_topic_(LibXR::Topic::CreateTopic<const AutoAim::SyncedFrame*>(
+            StageTopicName(name, AutoAim::STAGE_SYNCED).c_str()))
   {
     REQUIRE(speed_ >= 0.0);
     REQUIRE(Load());
@@ -78,9 +71,10 @@ class CaptureFileCamera : public CameraBase
   ~CaptureFileCamera() override { StopCapture(); }
 
  private:
-  /// 录像没有 IMU 时发布的静止姿态 / Resting attitude for recordings without IMU.
-  static constexpr CaptureFileRecording::RecordedImu RESTING_IMU{
-      {1.0F, 0.0F, 0.0F, 0.0F}, {0.0F, 0.0F, 0.0F}, {0.0F, 0.0F, 9.80665F}};
+  /// 录像没有 IMU 时的静止姿态（时间戳逐帧填写）/ Resting attitude for recordings
+  /// without IMU (the timestamp is filled per frame).
+  static constexpr AutoAim::ImuSample RESTING_IMU{
+      {}, {1.0F, 0.0F, 0.0F, 0.0F}, {0.0F, 0.0F, 0.0F}, {0.0F, 0.0F, 9.80665F}};
   /// 等待时检查是否停止的间隔 / How often waits check for a stop request.
   static constexpr auto WAIT_STEP = std::chrono::milliseconds(50);
 
@@ -136,7 +130,6 @@ class CaptureFileCamera : public CameraBase
     {
       return false;
     }
-    PublishImu(row.imu.value_or(RESTING_IMU), timestamp_us);
 
     std::string error;
     if (!CaptureFileRecording::ReadPgm(CaptureFileRecording::PgmPath(dir_, row.frame),
@@ -148,8 +141,19 @@ class CaptureFileCamera : public CameraBase
     frame.timestamp_us = LibXR::MicrosecondTimestamp(timestamp_us);
     frame.frame_counter = row.frame_counter;
     frame.geometry = row.geometry;
+    imu_ = row.imu.value_or(RESTING_IMU);
+    imu_.timestamp_us = frame.timestamp_us;
     ++played_;
     return true;
+  }
+
+  /// 图像发布后，用同一张图发布同步帧 / After the image, publish the synced frame
+  /// holding the same image.
+  void OnPublished(const SharedFrame& frame) override
+  {
+    const AutoAim::SyncedFrame synced{played_, frame, imu_};
+    const AutoAim::SyncedFrame* payload = &synced;
+    synced_topic_.Publish(payload);
   }
 
   /// 回放的几何由录像决定；视角请求被接受但不生效。
@@ -198,28 +202,13 @@ class CaptureFileCamera : public CameraBase
     return false;
   }
 
-  void PublishImu(const CaptureFileRecording::RecordedImu& imu, uint64_t timestamp_us)
-  {
-    const LibXR::MicrosecondTimestamp timestamp(timestamp_us);
-    ImuVector gyro(imu.angular_velocity_xyz[0], imu.angular_velocity_xyz[1],
-                   imu.angular_velocity_xyz[2]);
-    ImuVector accl(imu.linear_acceleration_xyz[0], imu.linear_acceleration_xyz[1],
-                   imu.linear_acceleration_xyz[2]);
-    ImuQuaternion quat(imu.rotation_wxyz[0], imu.rotation_wxyz[1], imu.rotation_wxyz[2],
-                       imu.rotation_wxyz[3]);
-    gyro_topic_.Publish(gyro, timestamp);
-    accl_topic_.Publish(accl, timestamp);
-    quat_topic_.Publish(quat, timestamp);
-  }
-
   const std::string dir_;
   const double speed_;
   const bool loop_;
   const uint32_t max_frames_;
-  LibXR::Topic gyro_topic_;
-  LibXR::Topic accl_topic_;
-  LibXR::Topic quat_topic_;
+  LibXR::Topic synced_topic_;
   std::vector<CaptureFileRecording::Row> rows_;
+  AutoAim::ImuSample imu_{};  ///< 当前帧的 IMU，取帧与发布都在采集线程 / Capture thread
   std::size_t next_ = 0;
   uint64_t played_ = 0;
   uint64_t pass_us_ = 0;
